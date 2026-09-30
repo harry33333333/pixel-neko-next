@@ -1,0 +1,158 @@
+#include "keyboard.h"
+
+static int shift = 0;
+static int ctrl = 0;
+static int caps = 0;
+static int alt = 0;
+static int e0_flag = 0;
+
+#define KEY_BUF_SIZE 64
+static int key_buf[KEY_BUF_SIZE];
+static int key_head = 0, key_tail = 0;
+
+static void push_key(int key) {
+    int next = (key_head + 1) % KEY_BUF_SIZE;
+    if (next != key_tail) {
+        key_buf[key_head] = key;
+        key_head = next;
+    }
+}
+
+int keyboard_get_key(void) {
+    if (key_head == key_tail) return 0;
+    int key = key_buf[key_tail];
+    key_tail = (key_tail + 1) % KEY_BUF_SIZE;
+    return key;
+}
+
+int keyboard_get_ctrl(void) {
+    return ctrl;
+}
+
+// Scancode to ASCII tables
+static unsigned char kbdus[128] =
+{
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8',
+  '9', '0', '-', '=', '\b',
+  '\t',
+  'q', 'w', 'e', 'r',
+  't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0,
+  'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';',
+ '\'', '`',   0,
+ '\\', 'z', 'x', 'c', 'v', 'b', 'n',
+  'm', ',', '.', '/',   0,
+  '*',
+    0,
+  ' ',
+    0,
+    0,
+    0,   0,   0,   0,   0,   0,   0,   0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+  '-',
+    0,
+    0,
+    0,
+  '+',
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,   0,   0,
+    0,
+    0,
+    0,
+};
+
+static unsigned char kbdus_shift[128] =
+{
+    0,  27, '!', '@', '#', '$', '%', '^', '&', '*',
+  '(', ')', '_', '+', '\b',
+  '\t',
+  'Q', 'W', 'E', 'R',
+  'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    0,
+  'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':',
+ '\"', '~',   0,
+ '|', 'Z', 'X', 'C', 'V', 'B', 'N',
+  'M', '<', '>', '?',   0,
+  '*',
+    0,
+  ' ',
+    0,
+    0,
+    0,   0,   0,   0,   0,   0,   0,   0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+  '-',
+    0,
+    0,
+    0,
+  '+',
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,   0,   0,
+    0,
+    0,
+    0,
+};
+
+void keyboard_handle_byte(unsigned char scancode) {
+    if (scancode == 0xE0) {
+        e0_flag = 1;
+        return;
+    }
+    
+    int release = scancode & 0x80;
+    scancode &= 0x7F;
+
+    if (scancode == 0x2A || scancode == 0x36) {
+        shift = !release;
+    } else if (scancode == 0x1D) {
+        ctrl = !release;
+    } else if (scancode == 0x38) {
+        alt = !release;
+    } else if (scancode == 0x3A && !release) {
+        caps = !caps;
+    } else if (!release) {
+        if (e0_flag) {
+            switch(scancode) {
+                case 0x48: push_key(200); break; // UP
+                case 0x50: push_key(201); break; // DOWN
+                case 0x4B: push_key(202); break; // LEFT
+                case 0x4D: push_key(203); break; // RIGHT
+                case 0x47: push_key(204); break; // HOME
+                case 0x4F: push_key(205); break; // END
+                case 0x49: push_key(206); break; // PGUP
+                case 0x51: push_key(207); break; // PGDN
+                case 0x53: push_key(208); break; // DEL
+            }
+        } else {
+            if (scancode < 128) {
+                char c = shift ? kbdus_shift[scancode] : kbdus[scancode];
+                if (caps && c >= 'a' && c <= 'z') c -= 32;
+                else if (caps && c >= 'A' && c <= 'Z') c += 32;
+                if (c) {
+                    push_key((unsigned char)c);
+                }
+            }
+        }
+    }
+    
+    if (scancode != 0xE0) {
+        e0_flag = 0;
+    }
+}

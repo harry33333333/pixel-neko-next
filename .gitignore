@@ -1,0 +1,16 @@
+# Build outputs and intermediate object files
+*.o
+boot/*.o
+iso/
+*.iso
+*.bin
+disk.img
+
+# Scratch and dump files
+output.txt
+__pycache__/
+*.pyc
+
+# Editor directories
+.vscode/
+.idea/
