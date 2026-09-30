@@ -1,0 +1,37 @@
+name: Build OS ISO
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib nasm grub-pc-bin grub-common xorriso mtools dos2unix
+
+    - name: Ensure Unix line endings and permissions
+      run: |
+        dos2unix build_counter.sh || sed -i 's/\r$//' build_counter.sh
+        chmod +x build_counter.sh
+
+    - name: Build Kernel and ISO
+      run: |
+        make
+
+    - name: Upload Bootable ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: pixel-neko-bootable-iso
+        path: pixel_neko*.iso
+        if-no-files-found: error
