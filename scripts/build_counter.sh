@@ -1,23 +1,26 @@
 #!/bin/bash
-# build_counter.sh - Ã¿´Î±àÒëµÝÔö1007
+# build_counter.sh - æ¯æ¬¡ç¼–è¯‘é€’å¢ž build number
 
-VERSION_FILE="version.h"
-BUILD_FILE="build_number.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ¶ÁÈ¡µ±Ç°1007Öµ
+VERSION_FILE="$ROOT_DIR/include/version.h"
+BUILD_FILE="$SCRIPT_DIR/build_number.txt"
+
+# è¯»å–å½“å‰ build å€¼
 if [ -f "$BUILD_FILE" ]; then
     BUILD_NUM=$(cat "$BUILD_FILE")
 else
-    BUILD_NUM=1007
+    BUILD_NUM=1501
 fi
 
-# µÝÔö
+# è‡ªå¢ž
 BUILD_NUM=$((BUILD_NUM + 1))
 
-# ±£´æ
+# ä¿å­˜
 echo "$BUILD_NUM" > "$BUILD_FILE"
 
-# ¸üÐÂversion.h
+# ç”Ÿæˆ include/version.h
 cat > "$VERSION_FILE" << EOF
 #ifndef VERSION_H 
 #define VERSION_H 

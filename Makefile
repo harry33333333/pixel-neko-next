@@ -6,30 +6,43 @@ QEMU = qemu-system-i386
 
 CFLAGS = -m32 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
          -fno-stack-protector -fno-pie -mno-mmx -mno-sse -mno-sse2 \
-         -Os -Wall -Wextra -I.
+         -Os -Wall -Wextra -Iinclude -I.
 
 LDFLAGS = -m elf_i386
 ASMFLAGS = -f elf32
 
-C_SOURCES = kernel.c mouse.c wm.c font.c calc.c cpanel.c fat.c disk.c filemanager.c mm.c keyboard.c editor.c
+C_SOURCES = kernel/kernel.c \
+            kernel/mm.c \
+            drivers/mouse.c \
+            drivers/keyboard.c \
+            drivers/disk.c \
+            drivers/font.c \
+            wm/wm.c \
+            apps/calc.c \
+            apps/cpanel.c \
+            apps/editor.c \
+            apps/filemanager.c \
+            fs/fat.c
+
 ASM_SOURCES = boot/multiboot.asm boot/vbe.asm
-HEADERS = mouse.h wm.h font.h calc.h cpanel.h port.h version.h fat.h disk.h filemanager.h mm.h keyboard.h editor.h
+HEADERS = $(wildcard include/*.h)
 
 C_OBJECTS = $(C_SOURCES:.c=.o)
-ASM_OBJECTS = boot/multiboot.o boot/vbe.o
+ASM_OBJECTS = $(ASM_SOURCES:.asm=.o)
 OBJECTS = $(C_OBJECTS) $(ASM_OBJECTS)
 
 KERNEL_ELF = iso/boot/kernel.elf
-VERSION_STR = $(shell grep "KERNEL_BUILD" version.h | head -1 | cut -d '"' -f 2)
+VERSION_STR = $(shell grep "KERNEL_BUILD" include/version.h 2>/dev/null | head -1 | cut -d '"' -f 2)
 ISO_FILE = pixel_neko_build_$(VERSION_STR).iso
 
 .PHONY: all clean run debug rebuild
 
-all: version.h $(ISO_FILE)
+all: include/version.h $(ISO_FILE)
 
-version.h: build_counter.sh
-	@echo "  build..."
-	@./build_counter.sh
+include/version.h: scripts/build_counter.sh
+	@echo "  build counter..."
+	@chmod +x scripts/build_counter.sh
+	@./scripts/build_counter.sh
 
 %.o: %.c $(HEADERS)
 	@echo "  CC    $<"

@@ -1,6 +1,6 @@
 # Build outputs and intermediate object files
 *.o
-boot/*.o
+**/*.o
 iso/
 *.iso
 *.bin

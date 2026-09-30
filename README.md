@@ -35,23 +35,35 @@
 ## 📁 项目目录结构
 
 ```text
-├── boot/
-│   ├── multiboot.asm     # GRUB Multiboot 协议入口与 GDT 初始化
-│   └── vbe.asm           # 实模式蹦床（切换分辨率、APM 关机）
-├── kernel.c              # 内核主入口、显示模式设定与事件循环
-├── wm.c / wm.h           # 窗口管理器核心（图层、拖拽、事件处理、任务栏）
-├── mm.c / mm.h           # 物理内存管理（PMM 位图分配器、Multiboot mmap 解析）
-├── disk.c / disk.h       # ATA / ATAPI 硬盘与光盘驱动
-├── fat.c / fat.h         # FAT16 / FAT32 文件系统驱动
-├── keyboard.c / .h       # PS/2 键盘控制器与按键缓冲队列
-├── mouse.c / mouse.h     # PS/2 鼠标驱动与数据包解析
-├── font.c / font.h       # ASCII 8x16 字体渲染
-├── calc.c / calc.h       # 内置计算器应用
-├── editor.c / editor.h   # 内置文本编辑器应用
-├── cpanel.c / cpanel.h   # 内置控制面板应用
-├── filemanager.c / .h    # 内置文件管理器应用
-├── link_grub.ld          # 链接脚本
-├── Makefile              # 编译与构建规则
+├── .github/              # CI/CD 工作流与 CODEOWNERS
+├── boot/                 # GRUB Multiboot 协议与实模式蹦床汇编
+│   ├── multiboot.asm
+│   └── vbe.asm
+├── kernel/               # 内核核心层
+│   ├── kernel.c          # 内核主入口、显示设定与主事件泵
+│   └── mm.c              # 物理页框分配器（PMM Bitmap）
+├── drivers/              # 硬件与总线驱动
+│   ├── disk.c            # ATA / ATAPI 存储驱动
+│   ├── keyboard.c        # PS/2 键盘与按键缓冲
+│   ├── mouse.c           # PS/2 鼠标驱动
+│   ├── font.c            # 基础字体渲染
+│   └── linux_font.c      # Linux 内核字体位图
+├── fs/                   # 文件系统实现
+│   └── fat.c             # FAT16 / FAT32 文件系统
+├── wm/                   # 窗口管理器核心
+│   └── wm.c              # 窗口层叠、拖拽、任务栏与图层混合
+├── apps/                 # 内置桌面应用程序
+│   ├── calc.c            # 简易计算器
+│   ├── editor.c          # 文本编辑器
+│   ├── cpanel.c          # 控制面板（动态切分辨率、硬件信息）
+│   └── filemanager.c     # 图形化文件管理器
+├── include/              # 全局公共头文件
+│   └── *.h               # calc.h, wm.h, fat.h, port.h, etc.
+├── scripts/              # 编译与构建辅助脚本
+│   ├── build_counter.sh
+│   └── build_number.txt
+├── link_grub.ld          # 内核 ELF 链接脚本
+├── Makefile              # 顶级 Makefile 构建规则
 └── LICENSE               # MIT 开源协议
 ```
 
