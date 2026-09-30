@@ -20,7 +20,7 @@ ASM_OBJECTS = boot/multiboot.o boot/vbe.o
 OBJECTS = $(C_OBJECTS) $(ASM_OBJECTS)
 
 KERNEL_ELF = iso/boot/kernel.elf
-VERSION_STR = $(shell grep -o "Version [0-9.]*" wm.c | head -1 | cut -d ' ' -f 2)
+VERSION_STR = $(shell grep "KERNEL_BUILD" version.h | head -1 | cut -d '"' -f 2)
 ISO_FILE = pixel_neko_build_$(VERSION_STR).iso
 
 .PHONY: all clean run debug rebuild

@@ -198,7 +198,7 @@ static void about_win(unsigned char* v, int wx, int wy)
     font_draw_text(v,lx+18,ly+24,"M",3);
     font_draw_text(v,lx+26,ly+24,"K",5);
     font_draw_text(v, wx+8, wy+60, "Codename Pixel Neko Next", 0);
-    font_draw_text(v, wx+8, wy+80, "Version 1500.063", 0);
+    font_draw_text(v, wx+8, wy+80, "Version " KERNEL_BUILD, 0);
     font_draw_text(v, wx+8, wy+100, "(C) 2026 Tairitsu_tty / XNZM", 0);
     
     font_draw_text(v, wx+8, wy+120, "CPU:", 0);
