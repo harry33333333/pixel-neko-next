@@ -17,6 +17,9 @@ static int rs_dir(int mx, int my, int wx, int wy, int ww, int wh);
 // 双击判定的 tick 阈值（可根据体验调整）
 #define DOUBLE_CLICK_TICKS 60
 
+int redraw = 0;
+static int need_mr = 0;
+
 // Opened message for visual confirmation when an app is opened
 static char opened_msg[48] = "";
 static int opened_msg_timer = 0; // ticks
@@ -98,8 +101,6 @@ static int mip=0, miw=0;
 static int resizing=0, rsdir=0;
 static int rsox=0, rsoy=0, rsow=0, rsoh=0;
 static int tick=0;
-int redraw=0;
-static int need_mr=0;
 static int power_btn_pressed=0;
 static int power_confirm=0;
 static int power_cancel_pressed=0, power_ok_pressed=0;
