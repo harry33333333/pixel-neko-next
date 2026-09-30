@@ -1,11 +1,12 @@
-name: Build OS ISO
+name: Build and Release OS ISO
 
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,7 +19,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-multilib nasm grub-pc-bin grub-common xorriso mtools dos2unix
+        sudo apt-get install -y gcc-multilib nasm grub-pc-bin grub-common xorriso mtools dos2unix zip
 
     - name: Ensure Unix line endings and permissions
       run: |
@@ -28,10 +29,37 @@ jobs:
     - name: Build Kernel and ISO
       run: |
         make
+        VERSION=$(grep "KERNEL_BUILD" version.h | head -1 | cut -d '"' -f 2)
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "TAG_NAME=v$VERSION" >> $GITHUB_ENV
+        # 打包源码 zip 作为独立资产
+        git archive --format=zip --output="pixel_neko_source_${VERSION}.zip" HEAD
 
-    - name: Upload Bootable ISO
+    - name: Upload Bootable ISO Artifact
       uses: actions/upload-artifact@v4
       with:
         name: pixel-neko-bootable-iso
         path: pixel_neko*.iso
         if-no-files-found: error
+
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ env.TAG_NAME }}
+        name: "Pixel Neko Next ${{ env.TAG_NAME }}"
+        body: |
+          ## 🐾 Pixel Neko Next ${{ env.TAG_NAME }}
+
+          ### 📦 发布内容 / Release Assets:
+          - **可启动 ISO 镜像**：`pixel_neko_build_${{ env.VERSION }}.iso`
+          - **源码压缩包**：`pixel_neko_source_${{ env.VERSION }}.zip`
+          - **构建 Commit**：`${{ github.sha }}`
+
+          ### 💻 虚拟机运行说明:
+          - **QEMU**: `qemu-system-i386 -cdrom pixel_neko_build_${{ env.VERSION }}.iso -m 128M -boot d`
+          - **VirtualBox / VMware**: 创建 32 位 Other/Unknown 操作系统虚拟机，挂载该 ISO 即可开机体验 GUI。
+        draft: false
+        prerelease: false
+        files: |
+          pixel_neko*.iso
+          pixel_neko_source_*.zip
