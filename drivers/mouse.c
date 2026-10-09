@@ -6,7 +6,7 @@ static int mx = 160, my = 100;
 static int btn = 0;
 static int cycle = 0;
 static unsigned char buf[3];
-static int init_done = 0;
+static int init_done = 1;
 
 static unsigned short saved[16][16];
 static int saved_x = -1, saved_y = -1;
@@ -18,64 +18,78 @@ int mouse_get_speed(void) { return mouse_speed; }
 
 void mouse_init(void)
 {
-    for (volatile int i = 0; i < 5000000; i++);
+    for (volatile int i = 0; i < 100000; i++);
     
+    // Drain any leftover data from controller
     for (int i = 0; i < 100; i++) {
         if (inb(0x64) & 0x01) inb(0x60);
-        for (volatile int j = 0; j < 2000; j++);
+        for (volatile int j = 0; j < 1000; j++);
     }
     
+    // Enable second PS/2 port (auxiliary device)
     while (inb(0x64) & 0x02);
     outb(0x64, 0xA8);
-    for (volatile int i = 0; i < 100000; i++);
+    for (volatile int i = 0; i < 50000; i++);
 
+    // Read controller configuration byte
     while (inb(0x64) & 0x02);
     outb(0x64, 0x20);
-    for (volatile int i = 0; i < 100000; i++);
+    for (volatile int i = 0; i < 50000; i++);
     while (!(inb(0x64) & 0x01));
     unsigned char cfg = inb(0x60);
+
+    // Enable mouse IRQ12 (bit 1) and enable mouse clock (clear bit 5)
     cfg |= 0x02;
     cfg &= ~0x20;
 
+    // Write back controller configuration byte
     while (inb(0x64) & 0x02);
     outb(0x64, 0x60);
-    for (volatile int i = 0; i < 100000; i++);
+    for (volatile int i = 0; i < 50000; i++);
     while (inb(0x64) & 0x02);
     outb(0x60, cfg);
-    for (volatile int i = 0; i < 100000; i++);
+    for (volatile int i = 0; i < 50000; i++);
 
+    // Tell mouse to use default settings
     while (inb(0x64) & 0x02);
     outb(0x64, 0xD4);
-    for (volatile int i = 0; i < 100000; i++);
+    for (volatile int i = 0; i < 50000; i++);
+    while (inb(0x64) & 0x02);
+    outb(0x60, 0xF6); // Set defaults
+    for (volatile int i = 0; i < 50000; i++);
+    for (int t = 0; t < 100000; t++) {
+        if (inb(0x64) & 0x01) { inb(0x60); break; }
+    }
+
+    // Enable mouse streaming
+    while (inb(0x64) & 0x02);
+    outb(0x64, 0xD4);
+    for (volatile int i = 0; i < 50000; i++);
     while (inb(0x64) & 0x02);
     outb(0x60, 0xF4);
-    for (volatile int i = 0; i < 100000; i++);
-
-    int timeout = 10000000;
-    while (timeout--) {
-        if (inb(0x64) & 0x01) {
-            if (inb(0x60) == 0xFA) { init_done = 1; break; }
-        }
+    for (volatile int i = 0; i < 50000; i++);
+    for (int t = 0; t < 100000; t++) {
+        if (inb(0x64) & 0x01) { inb(0x60); break; }
     }
 
-    if (init_done) {
-        while (inb(0x64) & 0x02);
-        outb(0x64, 0xD4); for (volatile int i = 0; i < 50000; i++);
-        while (inb(0x64) & 0x02);
-        outb(0x60, 0xF3); for (volatile int i = 0; i < 50000; i++);
-        while (inb(0x64) & 0x02);
-        outb(0x64, 0xD4); for (volatile int i = 0; i < 50000; i++);
-        while (inb(0x64) & 0x02);
-        outb(0x60, 60);
+    // Drain any remaining ACKs or bytes
+    for (int i = 0; i < 50; i++) {
+        if (inb(0x64) & 0x01) inb(0x60);
+        for (volatile int j = 0; j < 500; j++);
     }
+
+    cycle = 0;
+    init_done = 1;
 }
 
 void mouse_handle_byte(unsigned char d)
 {
-    if (!init_done) return;
-    if (cycle == 0 && !(d & 0x08)) return;
-    buf[cycle] = d;
-    cycle++;
+    if (cycle == 0) {
+        // Bit 3 of byte 0 in a PS/2 packet MUST be 1.
+        // Also bits 6 and 7 (overflow) should be 0.
+        if (!(d & 0x08) || (d & 0xC0)) return;
+    }
+    buf[cycle++] = d;
     if (cycle == 3) {
         cycle = 0;
         btn = buf[0] & 0x07;

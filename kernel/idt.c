@@ -32,6 +32,11 @@ extern void isr20(void); extern void isr21(void); extern void isr22(void); exter
 extern void isr24(void); extern void isr25(void); extern void isr26(void); extern void isr27(void);
 extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
 extern void irq0(void);
+extern void irq1(void);
+extern void irq12(void);
+
+extern void mouse_handle_byte(unsigned char d);
+extern void keyboard_handle_byte(unsigned char d);
 
 static void (*isr_table[32])(void) = {
     isr0,  isr1,  isr2,  isr3,  isr4,  isr5,  isr6,  isr7,
@@ -126,20 +131,25 @@ void idt_init(void) {
 
     // Vector 32: IRQ0 (PIT Timer Tick)
     idt_set_gate(32, (unsigned int)irq0, 0x08, 0x8E);
+    // Vector 33: IRQ1 (PS/2 Keyboard)
+    idt_set_gate(33, (unsigned int)irq1, 0x08, 0x8E);
+    // Vector 44: IRQ12 (PS/2 Mouse)
+    idt_set_gate(44, (unsigned int)irq12, 0x08, 0x8E);
 
     // Remap 8259 PIC
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
     outb(0x21, 0x20); // Master IRQ0-7 -> vectors 0x20-0x27
     outb(0xA1, 0x28); // Slave IRQ8-15 -> vectors 0x28-0x2F
-    outb(0x21, 0x04);
-    outb(0xA1, 0x02);
-    outb(0x21, 0x01);
+    outb(0x21, 0x04); // Master has slave on IRQ2
+    outb(0xA1, 0x02); // Slave attached to IRQ2
+    outb(0x21, 0x01); // 8086 mode
     outb(0xA1, 0x01);
 
-    // Unmask IRQ0 on Master PIC, mask all others (mouse/kbd use polling)
-    outb(0x21, 0xFE);
-    outb(0xA1, 0xFF);
+    // Unmask IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade) on Master PIC
+    outb(0x21, 0xF8);
+    // Unmask IRQ12 (mouse) on Slave PIC
+    outb(0xA1, 0xEF);
 
     // Configure PIT Channel 0 for 100Hz (divider = 1193182 / 100 = 11932 = 0x2E9C)
     outb(0x43, 0x36);
@@ -153,6 +163,27 @@ void idt_init(void) {
 void irq_handler(struct trap_frame* frame) {
     if (frame->int_no == 32) {
         global_tick++;
+        outb(0x20, 0x20); // EOI to Master PIC
+    } else if (frame->int_no == 33) {
+        // IRQ1 Keyboard
+        for (;;) {
+            unsigned char st = inb(0x64);
+            if (!(st & 0x01)) break;
+            unsigned char data = inb(0x60);
+            if (st & 0x20) mouse_handle_byte(data);
+            else keyboard_handle_byte(data);
+        }
+        outb(0x20, 0x20); // EOI to Master PIC
+    } else if (frame->int_no == 44) {
+        // IRQ12 Mouse
+        for (;;) {
+            unsigned char st = inb(0x64);
+            if (!(st & 0x01)) break;
+            unsigned char data = inb(0x60);
+            if (st & 0x20) mouse_handle_byte(data);
+            else keyboard_handle_byte(data);
+        }
+        outb(0xA0, 0x20); // EOI to Slave PIC
         outb(0x20, 0x20); // EOI to Master PIC
     }
 }

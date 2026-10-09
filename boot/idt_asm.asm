@@ -58,6 +58,18 @@ irq0:
     push dword 32
     jmp irq_common_stub
 
+global irq1
+irq1:
+    push dword 0
+    push dword 33
+    jmp irq_common_stub
+
+global irq12
+irq12:
+    push dword 0
+    push dword 44
+    jmp irq_common_stub
+
 isr_common_stub:
     push ds
     push es
