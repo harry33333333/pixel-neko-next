@@ -14,8 +14,8 @@ static int rs_dir(int mx, int my, int wx, int wy, int ww, int wh);
 #include "keyboard.h"
 #include "mm.h"
 
-// 双击判定的 tick 阈值（可根据体验调整）
-#define DOUBLE_CLICK_TICKS 60
+// 双击判定的 tick 阈值（100Hz 下 45 ticks = 450ms）
+#define DOUBLE_CLICK_TICKS 45
 
 int redraw = 0;
 static int need_mr = 0;
@@ -482,7 +482,6 @@ int wm_need_mouse_reset(void){int r=need_mr;need_mr=0;return r;}
 
 void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_release)
 {
-    global_tick++;
     tick++;
     if(cv&&!cm&&!dragging&&!resizing&&!power_confirm&&!clp&&!okp&&!mip&&tick>60){tick=0;redraw=1;}
     

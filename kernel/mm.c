@@ -18,24 +18,175 @@ struct multiboot_mmap_entry {
     unsigned int type;
 } __attribute__((packed));
 
+static inline int has_cpuid(void) {
+    unsigned int flags1, flags2;
+    asm volatile (
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "movl %0, %1\n\t"
+        "xorl $0x200000, %1\n\t"
+        "pushl %1\n\t"
+        "popfl\n\t"
+        "pushfl\n\t"
+        "popl %1\n\t"
+        "pushl %0\n\t"
+        "popfl\n\t"
+        : "=r"(flags1), "=r"(flags2)
+    );
+    return ((flags1 ^ flags2) & 0x200000) != 0;
+}
+
 static inline void cpuid(unsigned int leaf, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx) {
     asm volatile ("cpuid"
                   : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
                   : "a" (leaf));
 }
 
-void pmm_init(void) {
-    // 1. Get CPU string
+static int str_equal(const char* a, const char* b) {
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static void str_copy_n(char* dst, const char* src, int max) {
+    int i = 0;
+    while (src[i] && i < max - 1) { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+}
+
+static void detect_cpu(void) {
+    if (!has_cpuid()) {
+        str_copy_n(cpu_model_string, "Classic x86 CPU", sizeof(cpu_model_string));
+        return;
+    }
+
     unsigned int eax, ebx, ecx, edx;
-    unsigned int* ptr = (unsigned int*)cpu_model_string;
+    unsigned int max_basic;
+    cpuid(0, &max_basic, &ebx, &ecx, &edx);
+
+    char vendor[13];
+    *(unsigned int*)&vendor[0] = ebx;
+    *(unsigned int*)&vendor[4] = edx;
+    *(unsigned int*)&vendor[8] = ecx;
+    vendor[12] = '\0';
+
+    // Check for extended brand string (leaf 0x80000000)
     cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
-    if (eax >= 0x80000004) {
+    if (eax >= 0x80000004 && eax <= 0x80000020) {
+        char raw_brand[49];
+        unsigned int* p = (unsigned int*)raw_brand;
         for (int i = 0; i < 3; i++) {
             cpuid(0x80000002 + i, &eax, &ebx, &ecx, &edx);
-            *ptr++ = eax; *ptr++ = ebx; *ptr++ = ecx; *ptr++ = edx;
+            *p++ = eax; *p++ = ebx; *p++ = ecx; *p++ = edx;
         }
-        cpu_model_string[48] = '\0';
+        raw_brand[48] = '\0';
+
+        // Trim leading spaces
+        int start = 0;
+        while (raw_brand[start] == ' ') start++;
+        if (raw_brand[start] != '\0') {
+            str_copy_n(cpu_model_string, &raw_brand[start], sizeof(cpu_model_string));
+            return;
+        }
     }
+
+    // Fallback: decode Family / Model / Stepping for older CPUs (Pentium Pro/II/III, K6, Cyrix, VIA, IDT)
+    if (max_basic >= 1) {
+        cpuid(1, &eax, &ebx, &ecx, &edx);
+        unsigned int model = (eax >> 4) & 0x0F;
+        unsigned int family = (eax >> 8) & 0x0F;
+        unsigned int ext_model = (eax >> 16) & 0x0F;
+        unsigned int ext_family = (eax >> 20) & 0xFF;
+
+        if (family == 6 || family == 15) {
+            model |= (ext_model << 4);
+        }
+        if (family == 15) {
+            family += ext_family;
+        }
+
+        if (str_equal(vendor, "GenuineIntel")) {
+            if (family == 6) {
+                switch (model) {
+                    case 1:  str_copy_n(cpu_model_string, "Intel Pentium Pro", sizeof(cpu_model_string)); return;
+                    case 3:  str_copy_n(cpu_model_string, "Intel Pentium II (Klamath)", sizeof(cpu_model_string)); return;
+                    case 5:  str_copy_n(cpu_model_string, "Intel Pentium II / Celeron (Deschutes)", sizeof(cpu_model_string)); return;
+                    case 6:  str_copy_n(cpu_model_string, "Intel Celeron (Mendocino)", sizeof(cpu_model_string)); return;
+                    case 7:  str_copy_n(cpu_model_string, "Intel Pentium III (Katmai)", sizeof(cpu_model_string)); return;
+                    case 8:  str_copy_n(cpu_model_string, "Intel Pentium III (Coppermine)", sizeof(cpu_model_string)); return;
+                    case 9:  str_copy_n(cpu_model_string, "Intel Pentium M (Banias)", sizeof(cpu_model_string)); return;
+                    case 10: str_copy_n(cpu_model_string, "Intel Pentium III Xeon", sizeof(cpu_model_string)); return;
+                    case 11: str_copy_n(cpu_model_string, "Intel Pentium III (Tualatin)", sizeof(cpu_model_string)); return;
+                    default: str_copy_n(cpu_model_string, "Intel P6 Family CPU", sizeof(cpu_model_string)); return;
+                }
+            } else if (family == 5) {
+                if (model == 4) str_copy_n(cpu_model_string, "Intel Pentium MMX", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "Intel Pentium (P5)", sizeof(cpu_model_string));
+                return;
+            } else if (family == 15) {
+                str_copy_n(cpu_model_string, "Intel Pentium 4", sizeof(cpu_model_string));
+                return;
+            }
+        } else if (str_equal(vendor, "AuthenticAMD")) {
+            if (family == 5) {
+                if (model <= 3) str_copy_n(cpu_model_string, "AMD K5", sizeof(cpu_model_string));
+                else if (model == 6 || model == 7) str_copy_n(cpu_model_string, "AMD K6", sizeof(cpu_model_string));
+                else if (model == 8) str_copy_n(cpu_model_string, "AMD K6-2", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "AMD K6-III", sizeof(cpu_model_string));
+                return;
+            } else if (family == 6) {
+                if (model <= 3) str_copy_n(cpu_model_string, "AMD Athlon / Duron", sizeof(cpu_model_string));
+                else if (model == 8 || model == 10) str_copy_n(cpu_model_string, "AMD Athlon XP", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "AMD Athlon", sizeof(cpu_model_string));
+                return;
+            } else if (family == 15) {
+                str_copy_n(cpu_model_string, "AMD K8 (Athlon 64)", sizeof(cpu_model_string));
+                return;
+            }
+        } else if (str_equal(vendor, "CentaurHauls") || str_equal(vendor, "VIA VIA VIA ")) {
+            if (family == 5) {
+                if (model == 4) str_copy_n(cpu_model_string, "IDT WinChip C6", sizeof(cpu_model_string));
+                else if (model == 8) str_copy_n(cpu_model_string, "IDT WinChip 2", sizeof(cpu_model_string));
+                else if (model == 9) str_copy_n(cpu_model_string, "IDT WinChip 3", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "IDT WinChip", sizeof(cpu_model_string));
+                return;
+            } else if (family == 6) {
+                if (model == 6 || model == 7) str_copy_n(cpu_model_string, "VIA Cyrix III / C3 (Samuel)", sizeof(cpu_model_string));
+                else if (model == 8) str_copy_n(cpu_model_string, "VIA C3 (Ezra)", sizeof(cpu_model_string));
+                else if (model == 9) str_copy_n(cpu_model_string, "VIA C3 (Nehemiah)", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "VIA C3 Processor", sizeof(cpu_model_string));
+                return;
+            }
+        } else if (str_equal(vendor, "CyrixInstead")) {
+            if (family == 5) {
+                if (model == 4) str_copy_n(cpu_model_string, "Cyrix MediaGX", sizeof(cpu_model_string));
+                else str_copy_n(cpu_model_string, "Cyrix 6x86", sizeof(cpu_model_string));
+                return;
+            } else if (family == 6) {
+                str_copy_n(cpu_model_string, "Cyrix 6x86MX / MII", sizeof(cpu_model_string));
+                return;
+            }
+        } else if (str_equal(vendor, "RiseRiseRise")) {
+            str_copy_n(cpu_model_string, "Rise mP6", sizeof(cpu_model_string));
+            return;
+        } else if (str_equal(vendor, "TransmetaCPU")) {
+            str_copy_n(cpu_model_string, "Transmeta Crusoe", sizeof(cpu_model_string));
+            return;
+        }
+
+        // Generic fallback with vendor
+        str_copy_n(cpu_model_string, vendor, sizeof(cpu_model_string));
+        return;
+    }
+
+    str_copy_n(cpu_model_string, vendor, sizeof(cpu_model_string));
+}
+
+void pmm_init(void) {
+    // 1. Get CPU string
+    detect_cpu();
     
     // 2. Initialize bitmap: mark all as used initially
     for (unsigned int i = 0; i < sizeof(pmm_bitmap); i++) {

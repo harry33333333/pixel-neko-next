@@ -1,0 +1,216 @@
+#include "idt.h"
+#include "port.h"
+#include "mm.h"
+
+extern int global_tick;
+
+struct idt_entry {
+    unsigned short base_low;
+    unsigned short sel;
+    unsigned char  always0;
+    unsigned char  flags;
+    unsigned short base_high;
+} __attribute__((packed));
+
+struct idt_ptr {
+    unsigned short limit;
+    unsigned int   base;
+} __attribute__((packed));
+
+static struct idt_entry idt[256];
+static struct idt_ptr idtp;
+
+extern void idt_flush(unsigned int);
+
+// ISR declarations
+extern void isr0(void);  extern void isr1(void);  extern void isr2(void);  extern void isr3(void);
+extern void isr4(void);  extern void isr5(void);  extern void isr6(void);  extern void isr7(void);
+extern void isr8(void);  extern void isr9(void);  extern void isr10(void); extern void isr11(void);
+extern void isr12(void); extern void isr13(void); extern void isr14(void); extern void isr15(void);
+extern void isr16(void); extern void isr17(void); extern void isr18(void); extern void isr19(void);
+extern void isr20(void); extern void isr21(void); extern void isr22(void); extern void isr23(void);
+extern void isr24(void); extern void isr25(void); extern void isr26(void); extern void isr27(void);
+extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
+extern void irq0(void);
+
+static void (*isr_table[32])(void) = {
+    isr0,  isr1,  isr2,  isr3,  isr4,  isr5,  isr6,  isr7,
+    isr8,  isr9,  isr10, isr11, isr12, isr13, isr14, isr15,
+    isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23,
+    isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
+};
+
+static const char* exception_names[32] = {
+    "Divide-by-zero Error (#DE)",
+    "Debug (#DB)",
+    "Non-maskable Interrupt (NMI)",
+    "Breakpoint (#BP)",
+    "Overflow (#OF)",
+    "Bound Range Exceeded (#BR)",
+    "Invalid Opcode (#UD)",
+    "Device Not Available (#NM)",
+    "Double Fault (#DF)",
+    "Coprocessor Segment Overrun",
+    "Invalid TSS (#TS)",
+    "Segment Not Present (#NP)",
+    "Stack-Segment Fault (#SS)",
+    "General Protection Fault (#GP)",
+    "Page Fault (#PF)",
+    "Reserved",
+    "x87 FPU Floating-Point Error (#MF)",
+    "Alignment Check (#AC)",
+    "Machine Check (#MC)",
+    "SIMD Floating-Point Exception (#XM)",
+    "Virtualization Exception",
+    "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Security Exception", "Reserved"
+};
+
+static void idt_set_gate(unsigned char num, unsigned int base, unsigned short sel, unsigned char flags) {
+    idt[num].base_low = (base & 0xFFFF);
+    idt[num].base_high = (base >> 16) & 0xFFFF;
+    idt[num].sel = sel;
+    idt[num].always0 = 0;
+    idt[num].flags = flags;
+}
+
+static void serial_init(void) {
+    outb(0x3F8 + 1, 0x00); // Disable all interrupts
+    outb(0x3F8 + 3, 0x80); // Enable DLAB
+    outb(0x3F8 + 0, 0x03); // 38400 baud (divisor 3)
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03); // 8 bits, no parity, one stop bit
+    outb(0x3F8 + 2, 0xC7); // FIFO
+    outb(0x3F8 + 4, 0x0B); // IRQs enabled, RTS/DSR set
+}
+
+static void serial_putc(char c) {
+    while ((inb(0x3F8 + 5) & 0x20) == 0);
+    outb(0x3F8, c);
+}
+
+static void serial_puts(const char* s) {
+    while (*s) {
+        if (*s == '\n') serial_putc('\r');
+        serial_putc(*s++);
+    }
+}
+
+static void serial_puthex32(unsigned int val) {
+    const char hex[] = "0123456789ABCDEF";
+    serial_puts("0x");
+    for (int i = 28; i >= 0; i -= 4) {
+        serial_putc(hex[(val >> i) & 0xF]);
+    }
+}
+
+void idt_reload(void) {
+    idt_flush((unsigned int)&idtp);
+}
+
+void idt_init(void) {
+    serial_init();
+
+    idtp.limit = (sizeof(struct idt_entry) * 256) - 1;
+    idtp.base  = (unsigned int)&idt;
+
+    for (int i = 0; i < 256; i++) {
+        idt_set_gate(i, 0, 0, 0);
+    }
+
+    // Vectors 0..31: CPU Exceptions
+    for (int i = 0; i < 32; i++) {
+        idt_set_gate(i, (unsigned int)isr_table[i], 0x08, 0x8E);
+    }
+
+    // Vector 32: IRQ0 (PIT Timer Tick)
+    idt_set_gate(32, (unsigned int)irq0, 0x08, 0x8E);
+
+    // Remap 8259 PIC
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+    outb(0x21, 0x20); // Master IRQ0-7 -> vectors 0x20-0x27
+    outb(0xA1, 0x28); // Slave IRQ8-15 -> vectors 0x28-0x2F
+    outb(0x21, 0x04);
+    outb(0xA1, 0x02);
+    outb(0x21, 0x01);
+    outb(0xA1, 0x01);
+
+    // Unmask IRQ0 on Master PIC, mask all others (mouse/kbd use polling)
+    outb(0x21, 0xFE);
+    outb(0xA1, 0xFF);
+
+    // Configure PIT Channel 0 for 100Hz (divider = 1193182 / 100 = 11932 = 0x2E9C)
+    outb(0x43, 0x36);
+    outb(0x40, 0x9C);
+    outb(0x40, 0x2E);
+
+    idt_reload();
+    asm volatile("sti");
+}
+
+void irq_handler(struct trap_frame* frame) {
+    if (frame->int_no == 32) {
+        global_tick++;
+        outb(0x20, 0x20); // EOI to Master PIC
+    }
+}
+
+void isr_handler(struct trap_frame* frame) {
+    asm volatile("cli");
+
+    serial_puts("\n\n====================================================\n");
+    serial_puts("             *** KERNEL EXCEPTION PANIC ***\n");
+    serial_puts("====================================================\n");
+    if (frame->int_no < 32) {
+        serial_puts("Exception : ");
+        serial_puts(exception_names[frame->int_no]);
+        serial_puts("\n");
+    } else {
+        serial_puts("Interrupt Vector: ");
+        serial_puthex32(frame->int_no);
+        serial_puts("\n");
+    }
+
+    serial_puts("EIP       : "); serial_puthex32(frame->eip);
+    serial_puts("  CS    : "); serial_puthex32(frame->cs);
+    serial_puts("  EFLAGS: "); serial_puthex32(frame->eflags);
+    serial_puts("\n");
+
+    serial_puts("Error Code: "); serial_puthex32(frame->err_code);
+    serial_puts("\n");
+
+    serial_puts("EAX: "); serial_puthex32(frame->eax);
+    serial_puts("  EBX: "); serial_puthex32(frame->ebx);
+    serial_puts("  ECX: "); serial_puthex32(frame->ecx);
+    serial_puts("  EDX: "); serial_puthex32(frame->edx);
+    serial_puts("\n");
+
+    serial_puts("ESI: "); serial_puthex32(frame->esi);
+    serial_puts("  EDI: "); serial_puthex32(frame->edi);
+    serial_puts("  EBP: "); serial_puthex32(frame->ebp);
+    serial_puts("  ESP: "); serial_puthex32(frame->esp_dummy);
+    serial_puts("\n");
+
+    serial_puts("CPU Model : ");
+    serial_puts(cpu_model_string);
+    serial_puts("\n");
+    serial_puts("System halted safely. Triple-fault reboot prevented.\n");
+    serial_puts("====================================================\n");
+
+    // Also attempt text-mode screen dump if memory is reachable
+    volatile unsigned short* text_vram = (volatile unsigned short*)0xB8000;
+    const char* panic_msg = " KERNEL PANIC: ";
+    for (int i = 0; panic_msg[i]; i++) {
+        text_vram[i] = (unsigned short)(0x4F00 | (unsigned char)panic_msg[i]); // White on Red
+    }
+    const char* name = (frame->int_no < 32) ? exception_names[frame->int_no] : "Unknown";
+    for (int i = 0; name[i]; i++) {
+        text_vram[15 + i] = (unsigned short)(0x4F00 | (unsigned char)name[i]);
+    }
+
+    while (1) {
+        asm volatile("cli; hlt");
+    }
+}

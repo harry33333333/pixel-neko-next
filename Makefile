@@ -4,7 +4,7 @@ NASM = nasm
 GRUB_MKRESCUE = grub-mkrescue
 QEMU = qemu-system-i386
 
-CFLAGS = -m32 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+CFLAGS = -m32 -march=i686 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
          -fno-stack-protector -fno-pie -mno-mmx -mno-sse -mno-sse2 \
          -Os -Wall -Wextra -Iinclude -I.
 
@@ -13,6 +13,7 @@ ASMFLAGS = -f elf32
 
 C_SOURCES = kernel/kernel.c \
             kernel/mm.c \
+            kernel/idt.c \
             drivers/mouse.c \
             drivers/keyboard.c \
             drivers/disk.c \
@@ -24,7 +25,7 @@ C_SOURCES = kernel/kernel.c \
             apps/filemanager.c \
             fs/fat.c
 
-ASM_SOURCES = boot/multiboot.asm boot/vbe.asm
+ASM_SOURCES = boot/multiboot.asm boot/vbe.asm boot/idt_asm.asm
 HEADERS = $(wildcard include/*.h)
 
 C_OBJECTS = $(C_SOURCES:.c=.o)

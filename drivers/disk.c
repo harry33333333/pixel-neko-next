@@ -162,14 +162,28 @@ int disk_read_drive(int drive, unsigned int lba, unsigned char* buf)
     
     // Normal ATA
     lba += d->lba_offset;
-    ata_select_drive(port, d->drive_idx, lba);
-    if (ata_wait_ready(port) != 0) return -1;
-    
-    outb(port + 2, 1);
-    outb(port + 3, (unsigned char)(lba & 0xFF));
-    outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
-    outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
-    outb(port + 7, ATA_CMD_READ);
+    if (lba >= 0x0FFFFFFF) {
+        // 48-bit LBA Read
+        outb(port + 6, 0x40 | (d->drive_idx << 4));
+        if (ata_wait_ready(port) != 0) return -1;
+        outb(port + 2, 0); outb(port + 2, 1);
+        outb(port + 3, (unsigned char)((lba >> 24) & 0xFF));
+        outb(port + 3, (unsigned char)(lba & 0xFF));
+        outb(port + 4, 0);
+        outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
+        outb(port + 5, 0);
+        outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
+        outb(port + 7, ATA_CMD_READ_EXT);
+    } else {
+        // 28-bit LBA Read
+        ata_select_drive(port, d->drive_idx, lba);
+        if (ata_wait_ready(port) != 0) return -1;
+        outb(port + 2, 1);
+        outb(port + 3, (unsigned char)(lba & 0xFF));
+        outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
+        outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
+        outb(port + 7, ATA_CMD_READ);
+    }
     
     if (ata_wait_drq(port) != 0) return -1;
     
@@ -188,14 +202,28 @@ int disk_write_drive(int drive, unsigned int lba, const unsigned char* buf)
     
     unsigned int port = d->base_port;
     lba += d->lba_offset;
-    ata_select_drive(port, d->drive_idx, lba);
-    if (ata_wait_ready(port) != 0) return -1;
-    
-    outb(port + 2, 1);
-    outb(port + 3, (unsigned char)(lba & 0xFF));
-    outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
-    outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
-    outb(port + 7, ATA_CMD_WRITE);
+    if (lba >= 0x0FFFFFFF) {
+        // 48-bit LBA Write
+        outb(port + 6, 0x40 | (d->drive_idx << 4));
+        if (ata_wait_ready(port) != 0) return -1;
+        outb(port + 2, 0); outb(port + 2, 1);
+        outb(port + 3, (unsigned char)((lba >> 24) & 0xFF));
+        outb(port + 3, (unsigned char)(lba & 0xFF));
+        outb(port + 4, 0);
+        outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
+        outb(port + 5, 0);
+        outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
+        outb(port + 7, ATA_CMD_WRITE_EXT);
+    } else {
+        // 28-bit LBA Write
+        ata_select_drive(port, d->drive_idx, lba);
+        if (ata_wait_ready(port) != 0) return -1;
+        outb(port + 2, 1);
+        outb(port + 3, (unsigned char)(lba & 0xFF));
+        outb(port + 4, (unsigned char)((lba >> 8) & 0xFF));
+        outb(port + 5, (unsigned char)((lba >> 16) & 0xFF));
+        outb(port + 7, ATA_CMD_WRITE);
+    }
     
     if (ata_wait_drq(port) != 0) return -1;
     
@@ -204,9 +232,29 @@ int disk_write_drive(int drive, unsigned int lba, const unsigned char* buf)
         outw(port + 0, buf16[i]);
     }
     
-    outb(port + 7, ATA_CMD_CACHE_FLUSH);
-    if (ata_wait_ready(port) != 0) return -1;
+    // Per-sector cache flush removed for performance; flushed via disk_flush_all()
     return 0;
+}
+
+void disk_flush(int drive)
+{
+    if (drive < 0 || drive >= MAX_DRIVES) return;
+    disk_drive_t* d = &g_drives[drive];
+    if (!d->present || d->is_atapi) return;
+    unsigned int port = d->base_port;
+    outb(port + 6, 0xE0 | (d->drive_idx << 4));
+    if (ata_wait_ready(port) != 0) return;
+    outb(port + 7, ATA_CMD_CACHE_FLUSH);
+    ata_wait_ready(port);
+}
+
+void disk_flush_all(void)
+{
+    for (int i = 0; i < MAX_DRIVES; i++) {
+        if (g_drives[i].present && !g_drives[i].is_atapi) {
+            disk_flush(i);
+        }
+    }
 }
 
 // Backwards compat: use drive 0

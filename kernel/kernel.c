@@ -83,12 +83,23 @@ static void wait_vsync(void) {
 
 
 
+#include "idt.h"
+#include "mm.h"
+
 extern void bios_set_mode(int mode);
 
 void set_resolution(int w, int h, int bpp)
 {
+    // Bounds check to ensure resolution fits within backbuffer
+    if (w <= 0 || h <= 0 || w > 1024 || h > 768) return;
+    if ((unsigned int)(w * h * (bpp / 8)) > sizeof(backbuffer)) return;
+
     if (w == 320 && h == 200 && bpp == 8) {
+        asm volatile("cli");
         bios_set_mode(0x13);
+        idt_reload();
+        asm volatile("sti");
+
         screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
         lfb_ptr = 0xA0000;
         
@@ -103,6 +114,7 @@ void set_resolution(int w, int h, int bpp)
     else if (w == 1024 && h == 768 && bpp == 16) mode = 0x117;
     else return;
     
+    asm volatile("cli");
     if (vbe_get_mode_info(mode) == 0x004F) {
         struct vbe_mode_info* info = (struct vbe_mode_info*)0x9000;
         lfb_ptr = info->phys_base_ptr;
@@ -110,18 +122,20 @@ void set_resolution(int w, int h, int bpp)
     }
     
     vbe_set_mode(mode | 0x4000); // 0x4000 for LFB
+    idt_reload();
+    asm volatile("sti");
+
     screen_w = w; screen_h = h; screen_bpp = bpp;
 
     // 16-bit 模式也需要初始化 palette16[] 映射表
     set_vga_palette_full();
 }
 
-#include "mm.h"
-
 void kernel_main(void)
 {
+    idt_init();
     pmm_init();
-    set_resolution(1024, 768, 16);
+    set_resolution(800, 600, 16);
     
     unsigned char* v = backbuffer;
     int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
@@ -175,11 +189,30 @@ void kernel_main(void)
         }
 
         wait_vsync();
-        unsigned int* src = (unsigned int*)v;
-        unsigned int* dst = (unsigned int*)lfb_ptr;
-        int total_bytes = screen_pitch * screen_h;
-        for (int i = 0; i < total_bytes / 4; i++) {
-            dst[i] = src[i];
+        int bytes_per_line = screen_w * (screen_bpp / 8);
+        if (bytes_per_line == screen_pitch) {
+            int dwords = (bytes_per_line * screen_h) / 4;
+            unsigned int* s = (unsigned int*)v;
+            unsigned int* d = (unsigned int*)lfb_ptr;
+            for (int i = 0; i < dwords; i++) {
+                d[i] = s[i];
+            }
+        } else {
+            // Line-by-line copy handling hardware scanline pitch padding
+            for (int y = 0; y < screen_h; y++) {
+                unsigned char* s = v + y * bytes_per_line;
+                unsigned char* d = (unsigned char*)lfb_ptr + y * screen_pitch;
+                int dwords = bytes_per_line / 4;
+                for (int i = 0; i < dwords; i++) {
+                    ((unsigned int*)d)[i] = ((unsigned int*)s)[i];
+                }
+                for (int i = dwords * 4; i < bytes_per_line; i++) {
+                    d[i] = s[i];
+                }
+            }
         }
+
+        // Sleep CPU until next hardware interrupt (PIT timer tick / keyboard / mouse)
+        __asm__ volatile("hlt");
     }
 }
