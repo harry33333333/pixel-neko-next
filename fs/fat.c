@@ -358,6 +358,11 @@ int fat_list_root(void (*callback)(const file_info_t*)) {
 
 file_handle_t* fat_open(const char* name) {
     file_info_t info;
+    const char* path_for_vol = name;
+    fat_fs_t* vol = get_vol(&path_for_vol);
+    int vol_idx = vol ? (int)(vol - g_volumes) : 0;
+    if (vol_idx < 0 || vol_idx >= MAX_VOLUMES) vol_idx = 0;
+
     if (fat_find(name, &info) != 0) return 0;
     if (info.attr & 0x10) return 0;
     str_copy(g_handle.name, info.name, 13);
@@ -366,17 +371,16 @@ file_handle_t* fat_open(const char* name) {
     g_handle.current_cluster = info.first_cluster;
     g_handle.current_offset = 0;
     g_handle.cluster_offset = 0;
+    g_handle.volume_idx = (unsigned char)vol_idx;
     g_handle.is_open = 1;
     return &g_handle;
 }
 
 int fat_read(file_handle_t* handle, unsigned char* buf, unsigned int size) {
-    if (!handle->is_open) return -1;
-    // Note: this implementation reads from the first volume for simplicity,
-    // to properly support multiple volumes we should store the volume index in file_handle_t.
-    // Assuming C: for fat_read for now, or finding it based on something.
-    // Let's modify file_handle_t if needed, but for now we assume C:.
-    fat_fs_t* vol = &g_volumes[0];
+    if (!handle || !handle->is_open) return -1;
+    int v_idx = handle->volume_idx;
+    if (v_idx < 0 || v_idx >= MAX_VOLUMES || g_volumes[v_idx].type == 0) v_idx = 0;
+    fat_fs_t* vol = &g_volumes[v_idx];
     
     unsigned int bytes_read = 0, remaining = size;
     if (handle->current_offset >= handle->size) return 0;
@@ -553,6 +557,7 @@ struct cre_cb_data {
     const char* fat_name;
     const char* fat_ext;
     int is_dir;
+    unsigned int parent_cluster;
     int found;
 };
 
@@ -571,8 +576,31 @@ static int cre_cb(fat_fs_t* vol, dir_entry_t* entry, unsigned int sector, unsign
         unsigned int new_cluster = 0;
         if (data->is_dir) {
             new_cluster = allocate_cluster(vol);
+            unsigned char sector_buf[512] = {0};
+
+            // '.' entry pointing to self
+            dir_entry_t* dot = (dir_entry_t*)sector_buf;
+            for (int k = 0; k < 8; k++) dot->name[k] = ' ';
+            for (int k = 0; k < 3; k++) dot->ext[k] = ' ';
+            dot->name[0] = '.';
+            dot->attr = 0x10;
+            set_first_cluster(dot, new_cluster);
+            dot->file_size = 0;
+
+            // '..' entry pointing to parent directory
+            dir_entry_t* dotdot = (dir_entry_t*)(sector_buf + sizeof(dir_entry_t));
+            for (int k = 0; k < 8; k++) dotdot->name[k] = ' ';
+            for (int k = 0; k < 3; k++) dotdot->ext[k] = ' ';
+            dotdot->name[0] = '.';
+            dotdot->name[1] = '.';
+            dotdot->attr = 0x10;
+            set_first_cluster(dotdot, data->parent_cluster);
+            dotdot->file_size = 0;
+
+            disk_write_drive(vol->drive_idx, vol->partition_lba + cluster_to_sector(vol, new_cluster), sector_buf);
+
             unsigned char zero[512] = {0};
-            for (unsigned int i=0; i<vol->sectors_per_cluster; i++) {
+            for (unsigned int i = 1; i < vol->sectors_per_cluster; i++) {
                 disk_write_drive(vol->drive_idx, vol->partition_lba + cluster_to_sector(vol, new_cluster) + i, zero);
             }
         }
@@ -606,7 +634,7 @@ int fat_create_ext(const char* name, int is_dir) {
     unsigned char fat_name[8], fat_ext[3];
     str_to_fat_name(comp, fat_name, fat_ext);
 
-    struct cre_cb_data data = { (const char*)fat_name, (const char*)fat_ext, is_dir, 0 };
+    struct cre_cb_data data = { (const char*)fat_name, (const char*)fat_ext, is_dir, cluster, 0 };
     if (traverse_dir(vol, cluster, cre_cb, &data) != 0) return -1;
     return data.found ? 0 : -3;
 }
@@ -698,4 +726,7 @@ int fat_write_file(const char* name, const unsigned char* buf, unsigned int size
     return 0;
 }
 
-void fat_flush_all(void) { }
+extern void disk_flush_all(void);
+void fat_flush_all(void) {
+    disk_flush_all();
+}

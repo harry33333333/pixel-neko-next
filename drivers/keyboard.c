@@ -110,7 +110,18 @@ static unsigned char kbdus_shift[128] =
     0,
 };
 
+static int e1_skip = 0;
+
 void keyboard_handle_byte(unsigned char scancode) {
+    if (scancode == 0xE1) {
+        e1_skip = 2; // Pause key sends E1 1D 45 ... skip next bytes
+        return;
+    }
+    if (e1_skip > 0) {
+        e1_skip--;
+        return;
+    }
+
     if (scancode == 0xE0) {
         e0_flag = 1;
         return;
@@ -119,16 +130,15 @@ void keyboard_handle_byte(unsigned char scancode) {
     int release = scancode & 0x80;
     scancode &= 0x7F;
 
-    if (scancode == 0x2A || scancode == 0x36) {
-        shift = !release;
-    } else if (scancode == 0x1D) {
-        ctrl = !release;
-    } else if (scancode == 0x38) {
-        alt = !release;
-    } else if (scancode == 0x3A && !release) {
-        caps = !caps;
-    } else if (!release) {
-        if (e0_flag) {
+    if (e0_flag) {
+        // Extended keys
+        if (scancode == 0x1D) {
+            ctrl = !release; // Right Ctrl
+        } else if (scancode == 0x38) {
+            alt = !release;  // Right Alt
+        } else if (scancode == 0x2A || scancode == 0x37) {
+            // PrintScreen make sequence (E0 2A E0 37) - ignore fake shift
+        } else if (!release) {
             switch(scancode) {
                 case 0x48: push_key(200); break; // UP
                 case 0x50: push_key(201); break; // DOWN
@@ -140,19 +150,39 @@ void keyboard_handle_byte(unsigned char scancode) {
                 case 0x51: push_key(207); break; // PGDN
                 case 0x53: push_key(208); break; // DEL
             }
-        } else {
-            if (scancode < 128) {
-                char c = shift ? kbdus_shift[scancode] : kbdus[scancode];
-                if (caps && c >= 'a' && c <= 'z') c -= 32;
-                else if (caps && c >= 'A' && c <= 'Z') c += 32;
-                if (c) {
-                    push_key((unsigned char)c);
-                }
+        }
+        e0_flag = 0;
+        return;
+    }
+
+    // Standard keys (not E0 extended)
+    if (scancode == 0x2A || scancode == 0x36) {
+        shift = !release;
+    } else if (scancode == 0x1D) {
+        ctrl = !release;
+    } else if (scancode == 0x38) {
+        alt = !release;
+    } else if (scancode == 0x3A && !release) {
+        caps = !caps;
+    } else if (!release) {
+        if (scancode < 128) {
+            char base = kbdus[scancode];
+            char shifted = kbdus_shift[scancode];
+            char c = 0;
+
+            if (base >= 'a' && base <= 'z') {
+                // Letter keys: CapsLock and Shift interact via XOR
+                // Shift + CapsLock produces lowercase!
+                int uppercase = shift ^ caps;
+                c = uppercase ? (base - 32) : base;
+            } else {
+                // Non-letter keys: CapsLock does not affect symbols/digits
+                c = shift ? shifted : base;
+            }
+
+            if (c) {
+                push_key((unsigned char)c);
             }
         }
-    }
-    
-    if (scancode != 0xE0) {
-        e0_flag = 0;
     }
 }

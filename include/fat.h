@@ -69,6 +69,7 @@ typedef struct {
     unsigned int   current_cluster;
     unsigned int   current_offset;
     unsigned int   cluster_offset;
+    unsigned char  volume_idx;
     unsigned char  is_open;
 } file_handle_t;
 

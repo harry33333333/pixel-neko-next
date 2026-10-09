@@ -275,7 +275,7 @@ void fm_update(unsigned char* v, int mx, int my, int mb, int wx, int wy, int ww,
             int y = wy + 62 + i * 16;
             
             if (mx >= wx+4 && mx < wx+ww-4 && my >= y && my < y+16) {
-                if (last_click_idx == idx && global_tick - last_click_time < 30) {
+                if (last_click_idx == idx && global_tick - last_click_time < 45) {
                     open_file(idx);
                     last_click_idx = -1;
                 } else {

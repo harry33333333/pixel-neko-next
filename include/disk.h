@@ -21,6 +21,9 @@ int disk_write_drive(int drive, unsigned int lba, const unsigned char* buf);
 void disk_set_grub_mode(int mode);
 int disk_get_grub_mode(void);
 
+void disk_flush(int drive);
+void disk_flush_all(void);
+
 // For backwards compatibility where drive 0 is implicit
 int disk_detect(void);
 int disk_read(unsigned int lba, unsigned char* buf);

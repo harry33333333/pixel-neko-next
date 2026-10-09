@@ -9,16 +9,15 @@ BUILD_FILE="$SCRIPT_DIR/build_number.txt"
 
 # 读取当前 build 值
 if [ -f "$BUILD_FILE" ]; then
-    BUILD_NUM=$(cat "$BUILD_FILE")
+    RAW_VER=$(tr -d '\r\n' < "$BUILD_FILE")
 else
-    BUILD_NUM=1501
+    RAW_VER="1502.001"
 fi
 
-# 自增
-BUILD_NUM=$((BUILD_NUM + 1))
+BUILD_VER="$RAW_VER"
 
 # 保存
-echo "$BUILD_NUM" > "$BUILD_FILE"
+echo "$BUILD_VER" > "$BUILD_FILE"
 
 # 生成 include/version.h
 cat > "$VERSION_FILE" << EOF
@@ -28,7 +27,7 @@ cat > "$VERSION_FILE" << EOF
 #define KERNEL_NAME       "TBMK GUI Shell" 
 #define KERNEL_CODENAME   "Pixel Neko" 
 #define KERNEL_VERSION    "C2.0" 
-#define KERNEL_BUILD      "$BUILD_NUM.822" 
+#define KERNEL_BUILD      "$BUILD_VER" 
 #define KERNEL_COPYRIGHT  "(C) 2026 Tairitsu_tty" 
 #define KERNEL_AUTHOR     "Tairitsu_tty" 
 #define VER_STRING2       KERNEL_BUILD 
@@ -36,4 +35,4 @@ cat > "$VERSION_FILE" << EOF
 #endif 
 EOF
 
-echo "Build: $BUILD_NUM.822"
+echo "Build: $BUILD_VER"
