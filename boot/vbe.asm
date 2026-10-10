@@ -3,6 +3,7 @@ global vbe_set_mode
 global vbe_get_mode_info
 global bios_set_mode
 global bios_shutdown
+global bios_set_dac_ramp
 
 section .text
 
@@ -72,6 +73,21 @@ bios_shutdown:
     
     jmp 0x18:0x8000
 
+bios_set_dac_ramp:
+    push ebp
+    mov ebp, esp
+    pushad
+    
+    mov dword [0x7FF4], 0x4F09
+    mov [0x7FFC], esp
+    
+    mov esi, payload_start
+    mov edi, 0x8000
+    mov ecx, payload_end - payload_start
+    rep movsb
+    
+    jmp 0x18:0x8000
+
 align 4
 payload_start:
 bits 16
@@ -102,6 +118,8 @@ real_mode:
     je .do_set
     cmp ax, 0x4F01
     je .do_get
+    cmp ax, 0x4F09
+    je .do_set_ramp
     cmp ax, 0x5307
     je .do_shutdown
     jmp .done
@@ -119,6 +137,49 @@ real_mode:
 .do_get:
     mov cx, [0x7FF0]
     mov di, 0x9000
+    int 0x10
+    jmp .done
+
+.do_set_ramp:
+    ; Build 256-entry linear identity ramp table at 0x1000:
+    ; Format for VBE 4F09h (Set Palette Data): Blue, Green, Red, Alignment
+    xor bx, bx
+    mov di, 0x1000
+.build_4f09:
+    mov al, bl
+    mov [di], al
+    mov [di+1], al
+    mov [di+2], al
+    mov byte [di+3], 0
+    add di, 4
+    inc bl
+    jnz .build_4f09
+
+    mov ax, 0x4F09
+    xor bx, bx
+    mov cx, 256
+    xor dx, dx
+    mov di, 0x1000
+    int 0x10
+
+    ; Also try standard VGA BIOS AX=1012h (Set Block of DAC Registers)
+    ; Format: Red, Green, Blue (6-bit values 0..63)
+    xor bx, bx
+    mov di, 0x1400
+.build_1012:
+    mov al, bl
+    shr al, 2
+    mov [di], al
+    mov [di+1], al
+    mov [di+2], al
+    add di, 3
+    inc bl
+    jnz .build_1012
+
+    mov ax, 0x1012
+    xor bx, bx
+    mov cx, 256
+    mov dx, 0x1400
     int 0x10
     jmp .done
 

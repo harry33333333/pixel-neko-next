@@ -65,13 +65,57 @@ static unsigned short make_color16(int r, int g, int b, const struct vbe_mode_in
         int b_val = ((b >> (8 - b_mask)) & ((1 << b_mask) - 1)) << b_pos;
         return (unsigned short)(r_val | g_val | b_val);
     }
-    // Default RGB 5:6:5 fallback
+    // Default RGB 5:6:5 fallback (or 5:5:5 for 15bpp)
+    if (screen_bpp == 15) {
+        return (unsigned short)((((r & 0xF8) >> 3) << 10) | (((g & 0xF8) >> 3) << 5) | ((b & 0xF8) >> 3));
+    }
     return RGB16(r, g, b);
 }
 
-static void set_vga_palette_full(const struct vbe_mode_info* info)
+static void program_special_ramdac(void)
 {
+    // Real-mode VBE 4F09h & VGA BIOS 1012h identity color ramp
+    bios_set_dac_ramp();
+    
+    // ATI Mach64 specific: unlock DAC access and write ramp
+    if (pci_vga.found && pci_vga.vendor == 0x1002) {
+        // Unlock DAC_VGA_ADR_EN (bit 13) in DAC_CNTL via MMIO at 0xBFCC4 and BAR1 if available
+        *(volatile unsigned int*)0xBFCC4 |= (1 << 13);
+        if (pci_vga.bar1) {
+            *(volatile unsigned int*)(pci_vga.bar1 + 0xC4) |= (1 << 13);
+        }
+        
+        // Write identity ramp via MMIO DAC_REGS at 0xBFCC0/0xBFCC1
+        *(volatile unsigned char*)0xBFCC0 = 0;
+        for (int i = 0; i < 256; i++) {
+            unsigned char ramp = (unsigned char)(i >> 2);
+            *(volatile unsigned char*)0xBFCC1 = ramp;
+            *(volatile unsigned char*)0xBFCC1 = ramp;
+            *(volatile unsigned char*)0xBFCC1 = ramp;
+        }
+        
+        // Write identity ramp via Mach64 sparse I/O 0x5EEC / 0x5EED
+        outb(0x5EEC, 0);
+        for (int i = 0; i < 256; i++) {
+            unsigned char ramp = (unsigned char)(i >> 2);
+            outb(0x5EED, ramp);
+            outb(0x5EED, ramp);
+            outb(0x5EED, ramp);
+        }
+    }
+    
+    // Also write standard VGA DAC ports (now unblocked)
     outb(0x3C8, 0);
+    for (int i = 0; i < 256; i++) {
+        unsigned char ramp = (unsigned char)(i >> 2);
+        outb(0x3C9, ramp);
+        outb(0x3C9, ramp);
+        outb(0x3C9, ramp);
+    }
+}
+
+static void set_vga_palette_full(const struct vbe_mode_info* info, int is_direct_color)
+{
     for (int i = 0; i < 256; i++) {
         int r, g, b;
         
@@ -89,22 +133,35 @@ static void set_vga_palette_full(const struct vbe_mode_info* info)
             b = ((n / 36) % 6) * 12;
         }
         
-        palette16[i] = make_color16(r * 4, g * 4, b * 4, info);
+        unsigned short c16 = make_color16(r * 4, g * 4, b * 4, info);
+        if (screen_bpp == 15) c16 &= 0x7FFF;
+        palette16[i] = c16;
 
-        if (screen_bpp == 8) {
+        if (!is_direct_color) {
+            if (i == 0) outb(0x3C8, 0);
             outb(0x3C9, r);
             outb(0x3C9, g);
             outb(0x3C9, b);
-        } else {
-            // In 15/16-bit high-color mode:
-            // Hardware with RAMDAC LUT mapping (such as ATI Mach64VT/VT2/3D Rage) passes each
-            // RGB channel through the DAC palette. An identity ramp (0->0 ... 255->63) ensures
-            // true colors are rendered directly without palette color corruption.
-            unsigned char ramp = (unsigned char)(i >> 2);
-            outb(0x3C9, ramp);
-            outb(0x3C9, ramp);
-            outb(0x3C9, ramp);
         }
+    }
+
+    if (is_direct_color) {
+        // Correctly detect Special / Programmable RAMDAC:
+        // 1. VBE direct_color_attributes & 1: Color ramp is programmable
+        // 2. ATI Mach64 (PCI vendor 0x1002): Hardware routes direct color through internal RAMDAC LUT
+        int is_special_ramdac = 0;
+        if (info && (info->direct_color_attributes & 1)) {
+            is_special_ramdac = 1;
+        }
+        if (pci_vga.found && pci_vga.vendor == 0x1002) {
+            is_special_ramdac = 1;
+        }
+
+        if (is_special_ramdac) {
+            program_special_ramdac();
+        }
+        // If FIXED RAMDAC (like S3 Trio64, S3 Vision968, Voodoo 3):
+        // DO NOT TOUCH 0x3C8/0x3C9! Leaving the DAC untouched prevents corruption on external RAMDACs (e.g. Bt485/TVP3026).
     }
 }
 
@@ -116,18 +173,127 @@ static void wait_vsync(void) {
     while (!(inb(0x3DA) & 8) && --timeout);
 }
 
-
-
 #include "idt.h"
 #include "mm.h"
 
 extern void bios_set_mode(int mode);
+extern void bios_set_dac_ramp(void);
+
+struct pci_vga_info {
+    int found;
+    unsigned short vendor;
+    unsigned short device;
+    unsigned int bar0;
+    unsigned int bar1;
+};
+
+static struct pci_vga_info pci_vga = {0, 0, 0, 0, 0};
+
+static inline unsigned int pci_read_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset)
+{
+    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
+    outl(0xCF8, address);
+    return inl(0xCFC);
+}
+
+static inline void pci_write_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset, unsigned int val)
+{
+    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
+    outl(0xCF8, address);
+    outl(0xCFC, val);
+}
+
+static void pci_scan_vga(void)
+{
+    pci_vga.found = 0;
+    for (int bus = 0; bus < 8; bus++) {
+        for (int slot = 0; slot < 32; slot++) {
+            unsigned int id = pci_read_config(bus, slot, 0, 0);
+            if (id == 0xFFFFFFFF || id == 0) continue;
+            unsigned int class_rev = pci_read_config(bus, slot, 0, 8);
+            unsigned char base_class = (class_rev >> 24) & 0xFF;
+            if (base_class == 0x03) { // Display Controller
+                pci_vga.found = 1;
+                pci_vga.vendor = id & 0xFFFF;
+                pci_vga.device = (id >> 16) & 0xFFFF;
+                pci_vga.bar0 = pci_read_config(bus, slot, 0, 0x10) & 0xFFFFFFF0;
+                pci_vga.bar1 = pci_read_config(bus, slot, 0, 0x14) & 0xFFFFFFF0;
+                
+                // Enable PCI Bus Mastering, Memory Space, and I/O Space
+                unsigned int cmd = pci_read_config(bus, slot, 0, 0x04);
+                pci_write_config(bus, slot, 0, 0x04, cmd | 0x07);
+                return;
+            }
+        }
+    }
+}
+
+static void s3_enable_law(void)
+{
+    // Unlock S3 registers
+    outb(0x3D4, 0x38);
+    outb(0x3D5, 0x48);
+    outb(0x3D4, 0x39);
+    outb(0x3D5, 0xA5);
+    
+    // CRTC 0x58: Linear Address Window (LAW) Control
+    // Bit 4: Enable LAW; Bits 0-1: Window size (3 = 4MB/8MB)
+    outb(0x3D4, 0x58);
+    unsigned char cr58 = inb(0x3D5);
+    outb(0x3D4, 0x58);
+    outb(0x3D5, cr58 | 0x13);
+}
+
+static int try_set_vbe_mode(int mode, int req_w, int req_h)
+{
+    // Clear the 256-byte VBE buffer
+    for (int i = 0; i < 256; i++) ((unsigned char*)0x9000)[i] = 0;
+    
+    struct vbe_mode_info* info = (struct vbe_mode_info*)0x9000;
+    int ret_info = vbe_get_mode_info(mode);
+    if (ret_info != 0x004F) return 0;
+    if (!(info->attributes & 0x01)) return 0; // Mode not supported in hardware
+    
+    unsigned int found_lfb = 0;
+    
+    // Attempt 1: VBE 2.0+ LFB mode (mode | 0x4000)
+    int ret_set = vbe_set_mode(mode | 0x4000);
+    if (ret_set == 0x004F && info->phys_base_ptr != 0) {
+        found_lfb = info->phys_base_ptr;
+    } else {
+        // Attempt 2: VBE 1.2 banked mode (without 0x4000) + PCI LFB fallback
+        ret_set = vbe_set_mode(mode);
+        if (ret_set == 0x004F) {
+            if (pci_vga.found && pci_vga.bar0 != 0) {
+                if (pci_vga.vendor == 0x5333) {
+                    s3_enable_law();
+                }
+                found_lfb = pci_vga.bar0;
+            }
+        }
+    }
+    
+    if (found_lfb == 0) return 0;
+    
+    idt_reload();
+    pic_remap();
+    asm volatile("cli");
+    
+    lfb_ptr = found_lfb;
+    screen_w = (info->x_res > 0) ? info->x_res : req_w;
+    screen_h = (info->y_res > 0) ? info->y_res : req_h;
+    screen_bpp = (info->bpp > 0) ? info->bpp : 16;
+    screen_pitch = (info->bytes_per_scanline > 0) ? info->bytes_per_scanline : (screen_w * (screen_bpp <= 8 ? 1 : 2));
+    
+    set_vga_palette_full(info, 1);
+    return 1;
+}
 
 void set_resolution(int w, int h, int bpp)
 {
     // Bounds check to ensure resolution fits within backbuffer
     if (w <= 0 || h <= 0 || w > 1024 || h > 768) return;
-    if ((unsigned int)(w * h * (bpp / 8)) > sizeof(backbuffer)) return;
+    if ((unsigned int)(w * h * (bpp <= 8 ? 1 : 2)) > sizeof(backbuffer)) return;
 
     if (w == 320 && h == 200 && bpp == 8) {
         asm volatile("cli");
@@ -140,51 +306,44 @@ void set_resolution(int w, int h, int bpp)
         lfb_ptr = 0xA0000;
         
         // Restore DAC palette for 8-bit mode
-        set_vga_palette_full(0);
+        set_vga_palette_full(0, 0);
         return;
     }
     
-    int mode = 0;
-    if (w == 640 && h == 480 && bpp == 16) mode = 0x111;
-    else if (w == 800 && h == 600 && bpp == 16) mode = 0x114;
-    else if (w == 1024 && h == 768 && bpp == 16) mode = 0x117;
-    else return;
-    
     asm volatile("cli");
-    struct vbe_mode_info* info = (struct vbe_mode_info*)0x9000;
-    int ret_info = vbe_get_mode_info(mode);
     
-    // Check if mode is supported AND has a valid Linear Framebuffer pointer
-    if (ret_info == 0x004F && info->phys_base_ptr != 0) {
-        int ret_set = vbe_set_mode(mode | 0x4000); // 0x4000 for LFB
-        if (ret_set == 0x004F) {
-            idt_reload();
-            pic_remap();
-            asm volatile("cli");
-            lfb_ptr = info->phys_base_ptr;
-            screen_pitch = info->bytes_per_scanline;
-            screen_w = w; screen_h = h; screen_bpp = bpp;
-            set_vga_palette_full(info);
+    // Ensure PCI devices are scanned
+    if (!pci_vga.found) {
+        pci_scan_vga();
+    }
+    
+    int candidates[4] = {0, 0, 0, 0};
+    int num_candidates = 0;
+    
+    if (w == 800 && h == 600) {
+        candidates[0] = 0x114; // 800x600 16bpp (64K colors)
+        candidates[1] = 0x113; // 800x600 15bpp (32K colors)
+        num_candidates = 2;
+    } else if (w == 640 && h == 480) {
+        candidates[0] = 0x111; // 640x480 16bpp (64K colors)
+        candidates[1] = 0x110; // 640x480 15bpp (32K colors)
+        num_candidates = 2;
+    } else if (w == 1024 && h == 768) {
+        candidates[0] = 0x117; // 1024x768 16bpp (64K colors)
+        candidates[1] = 0x116; // 1024x768 15bpp (32K colors)
+        num_candidates = 2;
+    }
+    
+    for (int i = 0; i < num_candidates; i++) {
+        if (try_set_vbe_mode(candidates[i], w, h)) {
             return;
         }
     }
 
-    // Fallback: If 800x600/1024x768 16bpp LFB failed, try 640x480 16bpp LFB
+    // Fallback: If 800x600/1024x768 failed, try 640x480 (16bpp then 15bpp)
     if (w != 640 || h != 480) {
-        int ret_info640 = vbe_get_mode_info(0x111);
-        if (ret_info640 == 0x004F && info->phys_base_ptr != 0) {
-            int ret_set640 = vbe_set_mode(0x111 | 0x4000);
-            if (ret_set640 == 0x004F) {
-                idt_reload();
-                pic_remap();
-                asm volatile("cli");
-                lfb_ptr = info->phys_base_ptr;
-                screen_pitch = info->bytes_per_scanline;
-                screen_w = 640; screen_h = 480; screen_bpp = 16;
-                set_vga_palette_full(info);
-                return;
-            }
-        }
+        if (try_set_vbe_mode(0x111, 640, 480)) return;
+        if (try_set_vbe_mode(0x110, 640, 480)) return;
     }
 
     // Fallback: Standard VGA 320x200 8-bit mode 0x13
@@ -194,23 +353,29 @@ void set_resolution(int w, int h, int bpp)
     asm volatile("cli");
     screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
     lfb_ptr = 0xA0000;
-    set_vga_palette_full(0);
+    set_vga_palette_full(0, 0);
 }
 
 void kernel_main(void)
 {
     idt_init();
     pmm_init();
+    pci_scan_vga();
     set_resolution(800, 600, 16);
     
     unsigned char* v = backbuffer;
     int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
 
-    // 用正确的 16-bit 颜色填充 backbuffer
-    unsigned short* v16 = (unsigned short*)v;
-    unsigned short gray = palette16[7];
-    for (int i = 0; i < 1024 * 768; i++) {
-        v16[i] = gray;
+    if (screen_bpp <= 8) {
+        for (int i = 0; i < 1024 * 768; i++) {
+            v[i] = 7;
+        }
+    } else {
+        unsigned short* v16 = (unsigned short*)v;
+        unsigned short gray = palette16[7];
+        for (int i = 0; i < 1024 * 768; i++) {
+            v16[i] = gray;
+        }
     }
 
     wm_init();
@@ -255,7 +420,7 @@ void kernel_main(void)
         }
 
         wait_vsync();
-        int bytes_per_line = screen_w * (screen_bpp / 8);
+        int bytes_per_line = screen_w * (screen_bpp <= 8 ? 1 : 2);
         if (bytes_per_line == screen_pitch) {
             int dwords = (bytes_per_line * screen_h) / 4;
             unsigned int* s = (unsigned int*)v;

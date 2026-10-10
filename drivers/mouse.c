@@ -120,16 +120,16 @@ void mouse_draw(unsigned char* vga)
         for (int i = 0; i < 16; i++)
             for (int j = 0; j < 16; j++)
                 if (saved_y+i < screen_h && saved_x+j < screen_w) {
-                    int offset = (saved_y+i) * screen_pitch + (saved_x+j) * (screen_bpp == 16 ? 2 : 1);
-                    if(screen_bpp==16) *((unsigned short*)&vga[offset]) = saved[i][j]; else vga[offset] = (unsigned char)saved[i][j];
+                    int offset = (saved_y+i) * screen_pitch + (saved_x+j) * (screen_bpp > 8 ? 2 : 1);
+                    if(screen_bpp > 8) *((unsigned short*)&vga[offset]) = saved[i][j]; else vga[offset] = (unsigned char)saved[i][j];
                 }
     }
     int x = mx, y = my;
     for (int i = 0; i < 16; i++)
         for (int j = 0; j < 16; j++) {
             if (y+i < screen_h && x+j < screen_w) {
-                int offset = (y+i) * screen_pitch + (x+j) * (screen_bpp == 16 ? 2 : 1);
-                saved[i][j] = screen_bpp==16 ? *((unsigned short*)&vga[offset]) : vga[offset];
+                int offset = (y+i) * screen_pitch + (x+j) * (screen_bpp > 8 ? 2 : 1);
+                saved[i][j] = screen_bpp > 8 ? *((unsigned short*)&vga[offset]) : vga[offset];
             } else {
                 saved[i][j] = 0;
             }
@@ -174,8 +174,8 @@ void mouse_reset(unsigned char* vga)
         for (int i = 0; i < 16; i++)
             for (int j = 0; j < 16; j++)
                 if (saved_y+i < screen_h && saved_x+j < screen_w) {
-                    int offset = (saved_y+i) * screen_pitch + (saved_x+j) * (screen_bpp == 16 ? 2 : 1);
-                    if(screen_bpp==16) *((unsigned short*)&vga[offset]) = saved[i][j]; else vga[offset] = (unsigned char)saved[i][j];
+                    int offset = (saved_y+i) * screen_pitch + (saved_x+j) * (screen_bpp > 8 ? 2 : 1);
+                    if(screen_bpp > 8) *((unsigned short*)&vga[offset]) = saved[i][j]; else vga[offset] = (unsigned char)saved[i][j];
                 }
     }
     saved_x = -1;
