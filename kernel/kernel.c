@@ -43,6 +43,77 @@ extern void check_revert_timer(void);
 #define NULL ((void*)0)
 #endif
 
+#include "idt.h"
+#include "mm.h"
+
+extern void bios_set_mode(int mode);
+extern void bios_set_dac_ramp(void);
+
+struct pci_vga_info {
+    int found;
+    unsigned short vendor;
+    unsigned short device;
+    unsigned int bar0;
+    unsigned int bar1;
+};
+
+static struct pci_vga_info pci_vga = {0, 0, 0, 0, 0};
+
+static inline unsigned int pci_read_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset)
+{
+    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
+    outl(0xCF8, address);
+    return inl(0xCFC);
+}
+
+static inline void pci_write_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset, unsigned int val)
+{
+    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
+    outl(0xCF8, address);
+    outl(0xCFC, val);
+}
+
+static void pci_scan_vga(void)
+{
+    pci_vga.found = 0;
+    for (int bus = 0; bus < 8; bus++) {
+        for (int slot = 0; slot < 32; slot++) {
+            unsigned int id = pci_read_config(bus, slot, 0, 0);
+            if (id == 0xFFFFFFFF || id == 0) continue;
+            unsigned int class_rev = pci_read_config(bus, slot, 0, 8);
+            unsigned char base_class = (class_rev >> 24) & 0xFF;
+            if (base_class == 0x03) { // Display Controller
+                pci_vga.found = 1;
+                pci_vga.vendor = id & 0xFFFF;
+                pci_vga.device = (id >> 16) & 0xFFFF;
+                pci_vga.bar0 = pci_read_config(bus, slot, 0, 0x10) & 0xFFFFFFF0;
+                pci_vga.bar1 = pci_read_config(bus, slot, 0, 0x14) & 0xFFFFFFF0;
+                
+                // Enable PCI Bus Mastering, Memory Space, and I/O Space
+                unsigned int cmd = pci_read_config(bus, slot, 0, 0x04);
+                pci_write_config(bus, slot, 0, 0x04, cmd | 0x07);
+                return;
+            }
+        }
+    }
+}
+
+static void s3_enable_law(void)
+{
+    // Unlock S3 registers
+    outb(0x3D4, 0x38);
+    outb(0x3D5, 0x48);
+    outb(0x3D4, 0x39);
+    outb(0x3D5, 0xA5);
+    
+    // CRTC 0x58: Linear Address Window (LAW) Control
+    // Bit 4: Enable LAW; Bits 0-1: Window size (3 = 4MB/8MB)
+    outb(0x3D4, 0x58);
+    unsigned char cr58 = inb(0x3D5);
+    outb(0x3D4, 0x58);
+    outb(0x3D5, cr58 | 0x13);
+}
+
 static const unsigned char vga16[16][3] = {
     {0x00,0x00,0x00}, {0x00,0x00,0x2A}, {0x00,0x2A,0x00}, {0x00,0x2A,0x2A},
     {0x2A,0x00,0x00}, {0x2A,0x00,0x2A}, {0x2A,0x15,0x00}, {0x2A,0x2A,0x2A},
@@ -173,76 +244,7 @@ static void wait_vsync(void) {
     while (!(inb(0x3DA) & 8) && --timeout);
 }
 
-#include "idt.h"
-#include "mm.h"
 
-extern void bios_set_mode(int mode);
-extern void bios_set_dac_ramp(void);
-
-struct pci_vga_info {
-    int found;
-    unsigned short vendor;
-    unsigned short device;
-    unsigned int bar0;
-    unsigned int bar1;
-};
-
-static struct pci_vga_info pci_vga = {0, 0, 0, 0, 0};
-
-static inline unsigned int pci_read_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset)
-{
-    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
-    outl(0xCF8, address);
-    return inl(0xCFC);
-}
-
-static inline void pci_write_config(unsigned char bus, unsigned char slot, unsigned char func, unsigned char offset, unsigned int val)
-{
-    unsigned int address = (1U << 31) | ((unsigned int)bus << 16) | ((unsigned int)slot << 11) | ((unsigned int)func << 8) | (offset & 0xFC);
-    outl(0xCF8, address);
-    outl(0xCFC, val);
-}
-
-static void pci_scan_vga(void)
-{
-    pci_vga.found = 0;
-    for (int bus = 0; bus < 8; bus++) {
-        for (int slot = 0; slot < 32; slot++) {
-            unsigned int id = pci_read_config(bus, slot, 0, 0);
-            if (id == 0xFFFFFFFF || id == 0) continue;
-            unsigned int class_rev = pci_read_config(bus, slot, 0, 8);
-            unsigned char base_class = (class_rev >> 24) & 0xFF;
-            if (base_class == 0x03) { // Display Controller
-                pci_vga.found = 1;
-                pci_vga.vendor = id & 0xFFFF;
-                pci_vga.device = (id >> 16) & 0xFFFF;
-                pci_vga.bar0 = pci_read_config(bus, slot, 0, 0x10) & 0xFFFFFFF0;
-                pci_vga.bar1 = pci_read_config(bus, slot, 0, 0x14) & 0xFFFFFFF0;
-                
-                // Enable PCI Bus Mastering, Memory Space, and I/O Space
-                unsigned int cmd = pci_read_config(bus, slot, 0, 0x04);
-                pci_write_config(bus, slot, 0, 0x04, cmd | 0x07);
-                return;
-            }
-        }
-    }
-}
-
-static void s3_enable_law(void)
-{
-    // Unlock S3 registers
-    outb(0x3D4, 0x38);
-    outb(0x3D5, 0x48);
-    outb(0x3D4, 0x39);
-    outb(0x3D5, 0xA5);
-    
-    // CRTC 0x58: Linear Address Window (LAW) Control
-    // Bit 4: Enable LAW; Bits 0-1: Window size (3 = 4MB/8MB)
-    outb(0x3D4, 0x58);
-    unsigned char cr58 = inb(0x3D5);
-    outb(0x3D4, 0x58);
-    outb(0x3D5, cr58 | 0x13);
-}
 
 static int try_set_vbe_mode(int mode, int req_w, int req_h)
 {
