@@ -2,6 +2,7 @@
 #include "font.h"
 #include "mouse.h"
 #include "wm.h"
+#include "port.h"
 
 static int slider_val = 2;
 
