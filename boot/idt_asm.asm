@@ -52,23 +52,30 @@ ISR_NOERRCODE 29
 ISR_ERRCODE   30
 ISR_NOERRCODE 31
 
-global irq0
-irq0:
+%macro DEFINE_IRQ 2
+global irq%1
+irq%1:
     push dword 0
-    push dword 32
+    push dword %2
     jmp irq_common_stub
+%endmacro
 
-global irq1
-irq1:
-    push dword 0
-    push dword 33
-    jmp irq_common_stub
-
-global irq12
-irq12:
-    push dword 0
-    push dword 44
-    jmp irq_common_stub
+DEFINE_IRQ 0, 32
+DEFINE_IRQ 1, 33
+DEFINE_IRQ 2, 34
+DEFINE_IRQ 3, 35
+DEFINE_IRQ 4, 36
+DEFINE_IRQ 5, 37
+DEFINE_IRQ 6, 38
+DEFINE_IRQ 7, 39
+DEFINE_IRQ 8, 40
+DEFINE_IRQ 9, 41
+DEFINE_IRQ 10, 42
+DEFINE_IRQ 11, 43
+DEFINE_IRQ 12, 44
+DEFINE_IRQ 13, 45
+DEFINE_IRQ 14, 46
+DEFINE_IRQ 15, 47
 
 isr_common_stub:
     push ds

@@ -14,7 +14,7 @@ static int error_timer = 0;
 static int last_click_idx = -1;
 static int last_click_time = 0;
 static int last_mb = 0;
-extern int global_tick;
+extern volatile int global_tick;
 extern int redraw;
 
 static int ctx_menu_open = 0;

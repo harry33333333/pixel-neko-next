@@ -8,7 +8,7 @@ static int slider_val = 2;
 int revert_timer = 0;
 static int prev_w = 800, prev_h = 600, prev_bpp = 16;
 extern void set_resolution(int w, int h, int bpp);
-extern int global_tick;
+extern volatile int global_tick;
 
 void check_revert_timer(void)
 {

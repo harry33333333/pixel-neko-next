@@ -77,8 +77,10 @@ static void set_vga_palette_full(void)
 
 
 static void wait_vsync(void) {
-    while (inb(0x3DA) & 8);
-    while (!(inb(0x3DA) & 8));
+    int timeout = 50000;
+    while ((inb(0x3DA) & 8) && --timeout);
+    timeout = 50000;
+    while (!(inb(0x3DA) & 8) && --timeout);
 }
 
 
@@ -98,6 +100,7 @@ void set_resolution(int w, int h, int bpp)
         asm volatile("cli");
         bios_set_mode(0x13);
         idt_reload();
+        pic_remap();
         asm volatile("sti");
 
         screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
@@ -123,6 +126,7 @@ void set_resolution(int w, int h, int bpp)
     
     vbe_set_mode(mode | 0x4000); // 0x4000 for LFB
     idt_reload();
+    pic_remap();
     asm volatile("sti");
 
     screen_w = w; screen_h = h; screen_bpp = bpp;
@@ -133,9 +137,9 @@ void set_resolution(int w, int h, int bpp)
 
 void kernel_main(void)
 {
-    idt_init();
     pmm_init();
     set_resolution(800, 600, 16);
+    idt_init();
     
     unsigned char* v = backbuffer;
     int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
@@ -210,9 +214,5 @@ void kernel_main(void)
                     d[i] = s[i];
                 }
             }
-        }
-
-        // Sleep CPU until next hardware interrupt (PIT timer tick / keyboard / mouse)
-        __asm__ volatile("hlt");
     }
 }

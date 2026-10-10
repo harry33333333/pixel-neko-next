@@ -65,7 +65,7 @@ static int icon_pressed = -1;
 static int icon_press_ox = 0, icon_press_oy = 0;
 static int icon_press_moved = 0;
 static int menu_open = 0, menu_index = -1;
-int global_tick = 0;
+volatile int global_tick = 0;
 static int last_click_icon = -1, last_click_time = 0, last_s = -1;
 // Track previous click release for double-click timing (separate from visual selection)
 static int last_click_icon_prev = -1, last_click_time_prev = 0;

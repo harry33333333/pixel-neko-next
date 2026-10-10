@@ -10,6 +10,7 @@ struct trap_frame {
 
 void idt_init(void);
 void idt_reload(void);
+void pic_remap(void);
 void isr_handler(struct trap_frame* frame);
 void irq_handler(struct trap_frame* frame);
 

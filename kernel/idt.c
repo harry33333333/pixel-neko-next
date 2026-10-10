@@ -2,7 +2,7 @@
 #include "port.h"
 #include "mm.h"
 
-extern int global_tick;
+extern volatile int global_tick;
 
 struct idt_entry {
     unsigned short base_low;
@@ -31,9 +31,10 @@ extern void isr16(void); extern void isr17(void); extern void isr18(void); exter
 extern void isr20(void); extern void isr21(void); extern void isr22(void); extern void isr23(void);
 extern void isr24(void); extern void isr25(void); extern void isr26(void); extern void isr27(void);
 extern void isr28(void); extern void isr29(void); extern void isr30(void); extern void isr31(void);
-extern void irq0(void);
-extern void irq1(void);
-extern void irq12(void);
+extern void irq0(void);  extern void irq1(void);  extern void irq2(void);  extern void irq3(void);
+extern void irq4(void);  extern void irq5(void);  extern void irq6(void);  extern void irq7(void);
+extern void irq8(void);  extern void irq9(void);  extern void irq10(void); extern void irq11(void);
+extern void irq12(void); extern void irq13(void); extern void irq14(void); extern void irq15(void);
 
 extern void mouse_handle_byte(unsigned char d);
 extern void keyboard_handle_byte(unsigned char d);
@@ -43,6 +44,11 @@ static void (*isr_table[32])(void) = {
     isr8,  isr9,  isr10, isr11, isr12, isr13, isr14, isr15,
     isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23,
     isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
+};
+
+static void (*irq_table[16])(void) = {
+    irq0,  irq1,  irq2,  irq3,  irq4,  irq5,  irq6,  irq7,
+    irq8,  irq9,  irq10, irq11, irq12, irq13, irq14, irq15
 };
 
 static const char* exception_names[32] = {
@@ -129,27 +135,12 @@ void idt_init(void) {
         idt_set_gate(i, (unsigned int)isr_table[i], 0x08, 0x8E);
     }
 
-    // Vector 32: IRQ0 (PIT Timer Tick)
-    idt_set_gate(32, (unsigned int)irq0, 0x08, 0x8E);
-    // Vector 33: IRQ1 (PS/2 Keyboard)
-    idt_set_gate(33, (unsigned int)irq1, 0x08, 0x8E);
-    // Vector 44: IRQ12 (PS/2 Mouse)
-    idt_set_gate(44, (unsigned int)irq12, 0x08, 0x8E);
+    // Vectors 32..47: All 16 Hardware IRQs (IRQ0..IRQ15)
+    for (int i = 0; i < 16; i++) {
+        idt_set_gate(32 + i, (unsigned int)irq_table[i], 0x08, 0x8E);
+    }
 
-    // Remap 8259 PIC
-    outb(0x20, 0x11);
-    outb(0xA0, 0x11);
-    outb(0x21, 0x20); // Master IRQ0-7 -> vectors 0x20-0x27
-    outb(0xA1, 0x28); // Slave IRQ8-15 -> vectors 0x28-0x2F
-    outb(0x21, 0x04); // Master has slave on IRQ2
-    outb(0xA1, 0x02); // Slave attached to IRQ2
-    outb(0x21, 0x01); // 8086 mode
-    outb(0xA1, 0x01);
-
-    // Unmask IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade) on Master PIC
-    outb(0x21, 0xF8);
-    // Unmask IRQ12 (mouse) on Slave PIC
-    outb(0xA1, 0xEF);
+    pic_remap();
 
     // Configure PIT Channel 0 for 100Hz (divider = 1193182 / 100 = 11932 = 0x2E9C)
     outb(0x43, 0x36);
@@ -160,12 +151,29 @@ void idt_init(void) {
     asm volatile("sti");
 }
 
+void pic_remap(void) {
+    // Remap 8259 PIC
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+    outb(0x21, 0x20); // Master IRQ0-7 -> vectors 0x20-0x27 (32-39)
+    outb(0xA1, 0x28); // Slave IRQ8-15 -> vectors 0x28-0x2F (40-47)
+    outb(0x21, 0x04); // Master has slave on IRQ2
+    outb(0xA1, 0x02); // Slave attached to IRQ2
+    outb(0x21, 0x01); // 8086 mode
+    outb(0xA1, 0x01);
+
+    // Unmask Master: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade)
+    outb(0x21, 0xF8);
+    // Unmask Slave: IRQ12 (mouse)
+    outb(0xA1, 0xEF);
+}
+
 void irq_handler(struct trap_frame* frame) {
     if (frame->int_no == 32) {
+        // IRQ0: Timer
         global_tick++;
-        outb(0x20, 0x20); // EOI to Master PIC
-    } else if (frame->int_no == 33) {
-        // IRQ1 Keyboard
+    } else if (frame->int_no == 33 || frame->int_no == 44) {
+        // IRQ1 Keyboard or IRQ12 Mouse
         for (;;) {
             unsigned char st = inb(0x64);
             if (!(st & 0x01)) break;
@@ -173,19 +181,30 @@ void irq_handler(struct trap_frame* frame) {
             if (st & 0x20) mouse_handle_byte(data);
             else keyboard_handle_byte(data);
         }
-        outb(0x20, 0x20); // EOI to Master PIC
-    } else if (frame->int_no == 44) {
-        // IRQ12 Mouse
-        for (;;) {
-            unsigned char st = inb(0x64);
-            if (!(st & 0x01)) break;
-            unsigned char data = inb(0x60);
-            if (st & 0x20) mouse_handle_byte(data);
-            else keyboard_handle_byte(data);
-        }
-        outb(0xA0, 0x20); // EOI to Slave PIC
-        outb(0x20, 0x20); // EOI to Master PIC
     }
+
+    // Spurious IRQ7 handling: check Master In-Service Register
+    if (frame->int_no == 39) {
+        outb(0x20, 0x0B);
+        unsigned char isr = inb(0x20);
+        if (!(isr & 0x80)) return; // Spurious IRQ7: do not send EOI
+    }
+
+    // Spurious IRQ15 handling: check Slave In-Service Register
+    if (frame->int_no == 47) {
+        outb(0xA0, 0x0B);
+        unsigned char isr = inb(0xA0);
+        if (!(isr & 0x80)) {
+            outb(0x20, 0x20); // Spurious IRQ15: send EOI only to Master
+            return;
+        }
+    }
+
+    // Send EOI to Slave then Master
+    if (frame->int_no >= 40) {
+        outb(0xA0, 0x20); // EOI to Slave PIC
+    }
+    outb(0x20, 0x20); // EOI to Master PIC
 }
 
 void isr_handler(struct trap_frame* frame) {
