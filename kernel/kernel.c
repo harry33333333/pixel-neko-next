@@ -101,7 +101,7 @@ void set_resolution(int w, int h, int bpp)
         bios_set_mode(0x13);
         idt_reload();
         pic_remap();
-        asm volatile("sti");
+        asm volatile("cli");
 
         screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
         lfb_ptr = 0xA0000;
@@ -127,7 +127,7 @@ void set_resolution(int w, int h, int bpp)
         if (ret_set == 0x004F) {
             idt_reload();
             pic_remap();
-            asm volatile("sti");
+            asm volatile("cli");
             lfb_ptr = info->phys_base_ptr;
             screen_pitch = info->bytes_per_scanline;
             screen_w = w; screen_h = h; screen_bpp = bpp;
@@ -144,7 +144,7 @@ void set_resolution(int w, int h, int bpp)
             if (ret_set640 == 0x004F) {
                 idt_reload();
                 pic_remap();
-                asm volatile("sti");
+                asm volatile("cli");
                 lfb_ptr = info->phys_base_ptr;
                 screen_pitch = info->bytes_per_scanline;
                 screen_w = 640; screen_h = 480; screen_bpp = 16;
@@ -158,7 +158,7 @@ void set_resolution(int w, int h, int bpp)
     bios_set_mode(0x13);
     idt_reload();
     pic_remap();
-    asm volatile("sti");
+    asm volatile("cli");
     screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
     lfb_ptr = 0xA0000;
     set_vga_palette_full();
@@ -233,7 +233,7 @@ void kernel_main(void)
         } else {
             // Line-by-line copy handling hardware scanline pitch padding
             for (int y = 0; y < screen_h; y++) {
-                unsigned char* s = v + y * bytes_per_line;
+                unsigned char* s = v + y * screen_pitch;
                 unsigned char* d = (unsigned char*)lfb_ptr + y * screen_pitch;
                 int dwords = bytes_per_line / 4;
                 for (int i = 0; i < dwords; i++) {

@@ -10,28 +10,27 @@ static int prev_w = 800, prev_h = 600, prev_bpp = 16;
 extern void set_resolution(int w, int h, int bpp);
 extern volatile int global_tick;
 
+static unsigned char cmos_get_sec(void) {
+    outb(0x70, 0x00);
+    return inb(0x71);
+}
+
 void check_revert_timer(void)
 {
-    static int last_tick = 0;
-    if (last_tick == 0) last_tick = global_tick;
-    int delta = global_tick - last_tick;
-    last_tick = global_tick;
+    static unsigned char last_cmos_sec = 0xFF;
+    unsigned char cur_sec = cmos_get_sec();
+    if (last_cmos_sec == 0xFF) last_cmos_sec = cur_sec;
 
-    if (revert_timer > 0) {
-        int old_sec = (revert_timer + 99) / 100;
-        if (delta > 0) {
-            if (delta > revert_timer) delta = revert_timer;
-            revert_timer -= delta;
-        }
-        int new_sec = (revert_timer + 99) / 100;
-        if (new_sec != old_sec) {
+    if (cur_sec != last_cmos_sec) {
+        last_cmos_sec = cur_sec;
+        if (revert_timer > 0) {
+            revert_timer--;
             extern int redraw;
             redraw = 1;
-        }
-        if (revert_timer == 0) {
-            set_resolution(prev_w, prev_h, prev_bpp);
-            extern int redraw;
-            redraw = 1;
+            if (revert_timer == 0) {
+                set_resolution(prev_w, prev_h, prev_bpp);
+                redraw = 1;
+            }
         }
     }
 }
@@ -73,7 +72,7 @@ void cpanel_draw(unsigned char* v, int wx, int wy, int ww, int wh)
     draw_btn(v, wx+10, wy+110, 115, 24, "800x600 16"); draw_btn(v, wx+130, wy+110, 115, 24, "1024x768 16");
     
     if (revert_timer > 0) {
-        int sec = (revert_timer + 99) / 100;
+        int sec = revert_timer;
         char buf[30] = "Revert?   s";
         buf[8] = '0' + (sec / 10);
         buf[9] = '0' + (sec % 10);
@@ -105,8 +104,8 @@ void cpanel_click(unsigned char* v, int mx, int my, int wx, int wy, int ww, int 
         return;
     }
 
-    if(mx>=wx+10 && mx<wx+125 && my>=wy+80 && my<wy+104) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(320, 200, 8); revert_timer = 100 * 10; }
-    if(mx>=wx+130 && mx<wx+245 && my>=wy+80 && my<wy+104) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(640, 480, 16); revert_timer = 100 * 10; }
-    if(mx>=wx+10 && mx<wx+125 && my>=wy+110 && my<wy+134) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(800, 600, 16); revert_timer = 100 * 10; }
-    if(mx>=wx+130 && mx<wx+245 && my>=wy+110 && my<wy+134) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(1024, 768, 16); revert_timer = 100 * 10; }
+    if(mx>=wx+10 && mx<wx+125 && my>=wy+80 && my<wy+104) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(320, 200, 8); revert_timer = 15; }
+    if(mx>=wx+130 && mx<wx+245 && my>=wy+80 && my<wy+104) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(640, 480, 16); revert_timer = 15; }
+    if(mx>=wx+10 && mx<wx+125 && my>=wy+110 && my<wy+134) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(800, 600, 16); revert_timer = 15; }
+    if(mx>=wx+130 && mx<wx+245 && my>=wy+110 && my<wy+134) { prev_w = screen_w; prev_h = screen_h; prev_bpp = screen_bpp; set_resolution(1024, 768, 16); revert_timer = 15; }
 }

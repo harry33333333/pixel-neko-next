@@ -483,6 +483,7 @@ int wm_need_mouse_reset(void){int r=need_mr;need_mr=0;return r;}
 void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_release)
 {
     tick++;
+    global_tick++;
     if(cv&&!cm&&!dragging&&!resizing&&!power_confirm&&!clp&&!okp&&!mip&&tick>60){tick=0;redraw=1;}
     
     int h,m,s; get_time(&h,&m,&s);

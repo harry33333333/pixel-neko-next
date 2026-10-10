@@ -143,13 +143,8 @@ void idt_init(void) {
 
     pic_remap();
 
-    // Configure PIT Channel 0 for 100Hz (divider = 1193182 / 100 = 11932 = 0x2E9C)
-    outb(0x43, 0x36);
-    outb(0x40, 0x9C);
-    outb(0x40, 0x2E);
-
     idt_reload();
-    asm volatile("sti");
+    asm volatile("cli");
 }
 
 void pic_remap(void) {
@@ -163,10 +158,9 @@ void pic_remap(void) {
     outb(0x21, 0x01); // 8086 mode
     outb(0xA1, 0x01);
 
-    // Unmask Master: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade)
-    outb(0x21, 0xF8);
-    // Unmask Slave: IRQ12 (mouse)
-    outb(0xA1, 0xEF);
+    // Mask all IRQs on PIC so hardware IRQs never disrupt Real Mode BIOS calls
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
 }
 
 void irq_handler(struct trap_frame* frame) {
