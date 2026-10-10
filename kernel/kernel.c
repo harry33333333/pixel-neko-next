@@ -214,5 +214,6 @@ void kernel_main(void)
                     d[i] = s[i];
                 }
             }
+        }
     }
 }
