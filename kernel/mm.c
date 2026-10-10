@@ -19,27 +19,32 @@ struct multiboot_mmap_entry {
 } __attribute__((packed));
 
 static inline int has_cpuid(void) {
-    unsigned int flags1, flags2;
+    unsigned int eax, ecx;
     asm volatile (
+        "pushfl\n\t"
         "pushfl\n\t"
         "popl %0\n\t"
         "movl %0, %1\n\t"
-        "xorl $0x200000, %1\n\t"
-        "pushl %1\n\t"
-        "popfl\n\t"
-        "pushfl\n\t"
-        "popl %1\n\t"
+        "xorl $0x200000, %0\n\t"
         "pushl %0\n\t"
         "popfl\n\t"
-        : "=r"(flags1), "=r"(flags2)
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "popfl\n\t"
+        : "=&r" (eax), "=&r" (ecx)
     );
-    return ((flags1 ^ flags2) & 0x200000) != 0;
+    return ((eax ^ ecx) & 0x200000) != 0;
 }
 
 static inline void cpuid(unsigned int leaf, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx) {
+    unsigned int a, b, c, d;
     asm volatile ("cpuid"
-                  : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
-                  : "a" (leaf));
+                  : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+                  : "0" (leaf));
+    if (eax) *eax = a;
+    if (ebx) *ebx = b;
+    if (ecx) *ecx = c;
+    if (edx) *edx = d;
 }
 
 static int str_equal(const char* a, const char* b) {
@@ -62,8 +67,8 @@ static void detect_cpu(void) {
         return;
     }
 
-    unsigned int eax, ebx, ecx, edx;
-    unsigned int max_basic;
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    unsigned int max_basic = 0;
     cpuid(0, &max_basic, &ebx, &ecx, &edx);
 
     char vendor[13];
@@ -72,27 +77,7 @@ static void detect_cpu(void) {
     *(unsigned int*)&vendor[8] = ecx;
     vendor[12] = '\0';
 
-    // Check for extended brand string (leaf 0x80000000)
-    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
-    if (eax >= 0x80000004 && eax <= 0x80000020) {
-        char raw_brand[49];
-        unsigned int* p = (unsigned int*)raw_brand;
-        for (int i = 0; i < 3; i++) {
-            cpuid(0x80000002 + i, &eax, &ebx, &ecx, &edx);
-            *p++ = eax; *p++ = ebx; *p++ = ecx; *p++ = edx;
-        }
-        raw_brand[48] = '\0';
-
-        // Trim leading spaces
-        int start = 0;
-        while (raw_brand[start] == ' ') start++;
-        if (raw_brand[start] != '\0') {
-            str_copy_n(cpu_model_string, &raw_brand[start], sizeof(cpu_model_string));
-            return;
-        }
-    }
-
-    // Fallback: decode Family / Model / Stepping for older CPUs (Pentium Pro/II/III, K6, Cyrix, VIA, IDT)
+    // Check basic leaf 1 first to identify Family / Model
     if (max_basic >= 1) {
         cpuid(1, &eax, &ebx, &ecx, &edx);
         unsigned int model = (eax >> 4) & 0x0F;
@@ -105,6 +90,28 @@ static void detect_cpu(void) {
         }
         if (family == 15) {
             family += ext_family;
+        }
+
+        // Extended brand string: Only query on AMD or Pentium 4+ (Family 15).
+        // On Intel Pentium II / Pentium Pro / Klamath, leaf 0x80000000 is unsupported.
+        if (family >= 15 || !str_equal(vendor, "GenuineIntel")) {
+            unsigned int ext_max = 0;
+            cpuid(0x80000000, &ext_max, &ebx, &ecx, &edx);
+            if (ext_max >= 0x80000004 && ext_max <= 0x80000020) {
+                char raw_brand[49];
+                unsigned int* p = (unsigned int*)raw_brand;
+                for (int i = 0; i < 3; i++) {
+                    cpuid(0x80000002 + i, &eax, &ebx, &ecx, &edx);
+                    *p++ = eax; *p++ = ebx; *p++ = ecx; *p++ = edx;
+                }
+                raw_brand[48] = '\0';
+                int start = 0;
+                while (raw_brand[start] == ' ') start++;
+                if (raw_brand[start] != '\0') {
+                    str_copy_n(cpu_model_string, &raw_brand[start], sizeof(cpu_model_string));
+                    return;
+                }
+            }
         }
 
         if (str_equal(vendor, "GenuineIntel")) {

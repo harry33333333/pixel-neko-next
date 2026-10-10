@@ -118,28 +118,57 @@ void set_resolution(int w, int h, int bpp)
     else return;
     
     asm volatile("cli");
-    if (vbe_get_mode_info(mode) == 0x004F) {
-        struct vbe_mode_info* info = (struct vbe_mode_info*)0x9000;
-        lfb_ptr = info->phys_base_ptr;
-        screen_pitch = info->bytes_per_scanline;
-    }
+    struct vbe_mode_info* info = (struct vbe_mode_info*)0x9000;
+    int ret_info = vbe_get_mode_info(mode);
     
-    vbe_set_mode(mode | 0x4000); // 0x4000 for LFB
+    // Check if mode is supported AND has a valid Linear Framebuffer pointer
+    if (ret_info == 0x004F && info->phys_base_ptr != 0) {
+        int ret_set = vbe_set_mode(mode | 0x4000); // 0x4000 for LFB
+        if (ret_set == 0x004F) {
+            idt_reload();
+            pic_remap();
+            asm volatile("sti");
+            lfb_ptr = info->phys_base_ptr;
+            screen_pitch = info->bytes_per_scanline;
+            screen_w = w; screen_h = h; screen_bpp = bpp;
+            set_vga_palette_full();
+            return;
+        }
+    }
+
+    // Fallback: If 800x600/1024x768 16bpp LFB failed, try 640x480 16bpp LFB
+    if (w != 640 || h != 480) {
+        int ret_info640 = vbe_get_mode_info(0x111);
+        if (ret_info640 == 0x004F && info->phys_base_ptr != 0) {
+            int ret_set640 = vbe_set_mode(0x111 | 0x4000);
+            if (ret_set640 == 0x004F) {
+                idt_reload();
+                pic_remap();
+                asm volatile("sti");
+                lfb_ptr = info->phys_base_ptr;
+                screen_pitch = info->bytes_per_scanline;
+                screen_w = 640; screen_h = 480; screen_bpp = 16;
+                set_vga_palette_full();
+                return;
+            }
+        }
+    }
+
+    // Fallback: Standard VGA 320x200 8-bit mode 0x13
+    bios_set_mode(0x13);
     idt_reload();
     pic_remap();
     asm volatile("sti");
-
-    screen_w = w; screen_h = h; screen_bpp = bpp;
-
-    // 16-bit 模式也需要初始化 palette16[] 映射表
+    screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
+    lfb_ptr = 0xA0000;
     set_vga_palette_full();
 }
 
 void kernel_main(void)
 {
+    idt_init();
     pmm_init();
     set_resolution(800, 600, 16);
-    idt_init();
     
     unsigned char* v = backbuffer;
     int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
