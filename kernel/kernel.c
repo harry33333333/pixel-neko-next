@@ -39,6 +39,17 @@ struct vbe_mode_info {
 
 extern void check_revert_timer(void);
 
+#ifndef NULL
+#define NULL ((void*)0)
+#endif
+
+static const unsigned char vga16[16][3] = {
+    {0x00,0x00,0x00}, {0x00,0x00,0x2A}, {0x00,0x2A,0x00}, {0x00,0x2A,0x2A},
+    {0x2A,0x00,0x00}, {0x2A,0x00,0x2A}, {0x2A,0x15,0x00}, {0x2A,0x2A,0x2A},
+    {0x15,0x15,0x15}, {0x15,0x15,0x3F}, {0x15,0x3F,0x15}, {0x15,0x3F,0x3F},
+    {0x3F,0x15,0x15}, {0x3F,0x15,0x3F}, {0x3F,0x3F,0x15}, {0x3F,0x3F,0x3F}
+};
+
 static unsigned short make_color16(int r, int g, int b, const struct vbe_mode_info* info)
 {
     if (info && (unsigned char)info->red_mask > 0 && (unsigned char)info->green_mask > 0 && (unsigned char)info->blue_mask > 0) {
@@ -60,73 +71,36 @@ static unsigned short make_color16(int r, int g, int b, const struct vbe_mode_in
 
 static void set_vga_palette_full(const struct vbe_mode_info* info)
 {
-    // Populate software palette16 table for UI rendering
+    outb(0x3C8, 0);
     for (int i = 0; i < 256; i++) {
         int r, g, b;
         
         if (i < 16) {
-            // 标准VGA 16色
-            static const unsigned char vga16[16][3] = {
-                {0x00,0x00,0x00}, {0x00,0x00,0x2A}, {0x00,0x2A,0x00}, {0x00,0x2A,0x2A},
-                {0x2A,0x00,0x00}, {0x2A,0x00,0x2A}, {0x2A,0x15,0x00}, {0x2A,0x2A,0x2A},
-                {0x15,0x15,0x15}, {0x15,0x15,0x3F}, {0x15,0x3F,0x15}, {0x15,0x3F,0x3F},
-                {0x3F,0x15,0x15}, {0x3F,0x15,0x3F}, {0x3F,0x3F,0x15}, {0x3F,0x3F,0x3F}
-            };
             r = vga16[i][0];
             g = vga16[i][1];
             b = vga16[i][2];
         } else if (i < 32) {
-            // 16级灰度
             int level = (i - 16) * 4;
             r = g = b = level;
         } else {
-            // 其余颜色：均匀分布
             int n = i - 32;
             r = (n % 6) * 12;
             g = ((n / 6) % 6) * 12;
             b = ((n / 36) % 6) * 12;
         }
         
-        // Scale 6-bit DAC values (0-63) to 8-bit (0-255)
-        int r8 = (r * 255) / 63;
-        int g8 = (g * 255) / 63;
-        int b8 = (b * 255) / 63;
-        palette16[i] = make_color16(r8, g8, b8, info);
-    }
+        palette16[i] = make_color16(r * 4, g * 4, b * 4, info);
 
-    outb(0x3C8, 0);
-    if (screen_bpp == 8) {
-        // In 8-bit mode, load the 256 colors into hardware VGA DAC
-        for (int i = 0; i < 256; i++) {
-            int r, g, b;
-            if (i < 16) {
-                static const unsigned char vga16[16][3] = {
-                    {0x00,0x00,0x00}, {0x00,0x00,0x2A}, {0x00,0x2A,0x00}, {0x00,0x2A,0x2A},
-                    {0x2A,0x00,0x00}, {0x2A,0x00,0x2A}, {0x2A,0x15,0x00}, {0x2A,0x2A,0x2A},
-                    {0x15,0x15,0x15}, {0x15,0x15,0x3F}, {0x15,0x3F,0x15}, {0x15,0x3F,0x3F},
-                    {0x3F,0x15,0x15}, {0x3F,0x15,0x3F}, {0x3F,0x3F,0x15}, {0x3F,0x3F,0x3F}
-                };
-                r = vga16[i][0]; g = vga16[i][1]; b = vga16[i][2];
-            } else if (i < 32) {
-                int level = (i - 16) * 4;
-                r = g = b = level;
-            } else {
-                int n = i - 32;
-                r = (n % 6) * 12;
-                g = ((n / 6) % 6) * 12;
-                b = ((n / 36) % 6) * 12;
-            }
+        if (screen_bpp == 8) {
             outb(0x3C9, r);
             outb(0x3C9, g);
             outb(0x3C9, b);
-        }
-    } else {
-        // In 15/16-bit high-color mode:
-        // Hardware with RAMDAC LUT mapping (such as ATI Mach64VT/VT2/3D Rage) passes each
-        // RGB channel through the DAC palette. An identity ramp (0->0 ... 255->63) ensures
-        // true colors are rendered directly without palette color corruption.
-        for (int i = 0; i < 256; i++) {
-            unsigned char ramp = (unsigned char)((i * 63) / 255);
+        } else {
+            // In 15/16-bit high-color mode:
+            // Hardware with RAMDAC LUT mapping (such as ATI Mach64VT/VT2/3D Rage) passes each
+            // RGB channel through the DAC palette. An identity ramp (0->0 ... 255->63) ensures
+            // true colors are rendered directly without palette color corruption.
+            unsigned char ramp = (unsigned char)(i >> 2);
             outb(0x3C9, ramp);
             outb(0x3C9, ramp);
             outb(0x3C9, ramp);
@@ -166,7 +140,7 @@ void set_resolution(int w, int h, int bpp)
         lfb_ptr = 0xA0000;
         
         // Restore DAC palette for 8-bit mode
-        set_vga_palette_full(NULL);
+        set_vga_palette_full(0);
         return;
     }
     
@@ -220,7 +194,7 @@ void set_resolution(int w, int h, int bpp)
     asm volatile("cli");
     screen_w = 320; screen_h = 200; screen_bpp = 8; screen_pitch = 320;
     lfb_ptr = 0xA0000;
-    set_vga_palette_full(NULL);
+    set_vga_palette_full(0);
 }
 
 void kernel_main(void)
