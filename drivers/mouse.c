@@ -1,4 +1,5 @@
 // mouse.c
+#include "mouse.h"
 #include "port.h"
 #include "wm.h"
 #include "irq.h"
