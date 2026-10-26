@@ -1,9 +1,7 @@
 // mouse.c
-#include "mouse.h"
 #include "port.h"
 #include "wm.h"
 #include "irq.h"
-#include "timer.h"
 
 static int mx = 160, my = 100;
 static int btn = 0;
@@ -11,32 +9,8 @@ static int cycle = 0;
 static unsigned char buf[3];
 static int init_done = 1;
 
-#define MOUSE_EVENT_QUEUE_SIZE 16
-static mouse_button_event_t button_events[MOUSE_EVENT_QUEUE_SIZE];
-static volatile unsigned int event_head;
-static volatile unsigned int event_tail;
-
 static unsigned int saved[16][16];
 static int saved_x = -1, saved_y = -1;
-
-static const char* cursor_shape[16] = {
-    "X               ",
-    "XX              ",
-    "X.X             ",
-    "X..X            ",
-    "X...X           ",
-    "X....X          ",
-    "X.....X         ",
-    "X......X        ",
-    "X.......X       ",
-    "X........X      ",
-    "X.........X     ",
-    "X......XXXX     ",
-    "X..X..X         ",
-    "X.X X..X        ",
-    "XX  X..X        ",
-    "     XX         "
-};
 
 int mouse_speed = 2;
 
@@ -117,29 +91,7 @@ void mouse_init(void)
     }
 
     cycle = 0;
-    event_head = 0;
-    event_tail = 0;
     init_done = 1;
-}
-
-static void queue_button_event(int old_buttons, int new_buttons, int x, int y)
-{
-    int pressed = !(old_buttons & 1) && (new_buttons & 1);
-    int released = (old_buttons & 1) && !(new_buttons & 1);
-    if (!pressed && !released) return;
-
-    unsigned int next = (event_head + 1U) % MOUSE_EVENT_QUEUE_SIZE;
-    if (next == event_tail) {
-        event_tail = (event_tail + 1U) % MOUSE_EVENT_QUEUE_SIZE;
-    }
-
-    button_events[event_head].x = x;
-    button_events[event_head].y = y;
-    button_events[event_head].buttons = new_buttons;
-    button_events[event_head].pressed = pressed;
-    button_events[event_head].released = released;
-    button_events[event_head].tick = global_tick;
-    event_head = next;
 }
 
 void mouse_handle_byte(unsigned char d)
@@ -152,7 +104,6 @@ void mouse_handle_byte(unsigned char d)
     buf[cycle++] = d;
     if (cycle == 3) {
         cycle = 0;
-        int old_btn = btn;
         btn = buf[0] & 0x07;
         int dx = buf[1];
         int dy = buf[2];
@@ -164,7 +115,6 @@ void mouse_handle_byte(unsigned char d)
         if (mx > screen_w - 1) mx = screen_w - 1;
         if (my < 0) my = 0;
         if (my > screen_h - 1) my = screen_h - 1;
-        queue_button_event(old_btn, btn, mx, my);
     }
 }
 
@@ -175,20 +125,6 @@ void mouse_get(int* x, int* y, int* b)
     if (y) *y = my;
     if (b) *b = btn;
     irq_restore_flags(flags);
-}
-
-int mouse_take_button_event(mouse_button_event_t* event)
-{
-    unsigned int flags = irq_save_flags();
-    if (!event || event_tail == event_head) {
-        irq_restore_flags(flags);
-        return 0;
-    }
-
-    *event = button_events[event_tail];
-    event_tail = (event_tail + 1U) % MOUSE_EVENT_QUEUE_SIZE;
-    irq_restore_flags(flags);
-    return 1;
 }
 
 void mouse_draw(unsigned char* vga)
@@ -215,6 +151,25 @@ void mouse_draw(unsigned char* vga)
         }
     saved_x = x;
     saved_y = y;
+
+    static const char* cursor_shape[16] = {
+        "X               ",
+        "XX              ",
+        "X.X             ",
+        "X..X            ",
+        "X...X           ",
+        "X....X          ",
+        "X.....X         ",
+        "X......X        ",
+        "X.......X       ",
+        "X........X      ",
+        "X.........X     ",
+        "X......XXXX     ",
+        "X..X..X         ",
+        "X.X X..X        ",
+        "XX  X..X        ",
+        "     XX         "
+    };
 
     for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 16; j++) {

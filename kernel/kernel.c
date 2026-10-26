@@ -134,7 +134,7 @@ static void set_vga_palette_full(const struct vbe_mode_info* info, int is_direct
 {
     for (int i = 0; i < 256; i++) {
         int r, g, b;
-        
+
         if (i < 16) {
             r = vga16[i][0];
             g = vga16[i][1];
@@ -164,15 +164,13 @@ static void set_vga_palette_full(const struct vbe_mode_info* info, int is_direct
 }
 
 
-static int copy_rect_to_lfb_raw(const unsigned char* src, int rx, int ry,
-                                int rw, int rh, int* nx, int* ny,
-                                int* nw, int* nh)
+void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
 {
     if (rx < 0) { rw += rx; rx = 0; }
     if (ry < 0) { rh += ry; ry = 0; }
     if (rx + rw > screen_w) rw = screen_w - rx;
     if (ry + rh > screen_h) rh = screen_h - ry;
-    if (rw <= 0 || rh <= 0) return 0;
+    if (rw <= 0 || rh <= 0) return;
 
     int bytes_per_pixel = (screen_bpp <= 8) ? 1 : ((screen_bpp <= 16) ? 2 : ((screen_bpp <= 24) ? 3 : 4));
     int line_bytes = rw * bytes_per_pixel;
@@ -183,58 +181,14 @@ static int copy_rect_to_lfb_raw(const unsigned char* src, int rx, int ry,
         unsigned char* d = (unsigned char*)lfb_ptr + offset;
         
         int dwords = line_bytes / 4;
-        if (dwords > 0) {
-            unsigned int src32 = (unsigned int)s;
-            unsigned int dst32 = (unsigned int)d;
-            asm volatile("cld; rep movsl"
-                         : "+S"(src32), "+D"(dst32), "+c"(dwords)
-                         :
-                         : "memory");
-            s = (const unsigned char*)src32;
-            d = (unsigned char*)dst32;
-            s -= dwords * 4;
-            d -= dwords * 4;
+        for (int i = 0; i < dwords; i++) {
+            ((unsigned int*)d)[i] = ((const unsigned int*)s)[i];
         }
         for (int i = dwords * 4; i < line_bytes; i++) {
             d[i] = s[i];
         }
     }
-
-    if (nx) *nx = rx;
-    if (ny) *ny = ry;
-    if (nw) *nw = rw;
-    if (nh) *nh = rh;
-    return 1;
-}
-
-void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
-{
-    int nx, ny, nw, nh;
-    if (copy_rect_to_lfb_raw(src, rx, ry, rw, rh, &nx, &ny, &nw, &nh)) {
-        gfx_accel_present_rect(nx, ny, nw, nh);
-    }
-}
-
-static void present_cursor_rects(int old_x, int old_y, int new_x, int new_y)
-{
-    if (old_x < 0) {
-        gfx_accel_present_rect(new_x, new_y, 16, 16);
-        return;
-    }
-
-    int overlap = old_x < new_x + 16 && new_x < old_x + 16 &&
-                  old_y < new_y + 16 && new_y < old_y + 16;
-    if (!overlap) {
-        gfx_accel_present_rect(old_x, old_y, 16, 16);
-        gfx_accel_present_rect(new_x, new_y, 16, 16);
-        return;
-    }
-
-    int left = old_x < new_x ? old_x : new_x;
-    int top = old_y < new_y ? old_y : new_y;
-    int right = old_x > new_x ? old_x + 16 : new_x + 16;
-    int bottom = old_y > new_y ? old_y + 16 : new_y + 16;
-    gfx_accel_present_rect(left, top, right - left, bottom - top);
+    gfx_accel_present_rect(rx, ry, rw, rh);
 }
 
 void copy_fullscreen_to_lfb(const unsigned char* s_buf)
@@ -243,31 +197,21 @@ void copy_fullscreen_to_lfb(const unsigned char* s_buf)
     int bytes_per_line = screen_w * bytes_per_pixel;
     if (bytes_per_line == screen_pitch) {
         int dwords = (bytes_per_line * screen_h) / 4;
-        unsigned int src32 = (unsigned int)s_buf;
-        unsigned int dst32 = lfb_ptr;
-        asm volatile("cld; rep movsl"
-                     : "+S"(src32), "+D"(dst32), "+c"(dwords)
-                     :
-                     : "memory");
+        const unsigned int* s = (const unsigned int*)s_buf;
+        unsigned int* d = (unsigned int*)lfb_ptr;
+        for (int i = 0; i < dwords; i++) {
+            d[i] = s[i];
+        }
         for (int i = dwords * 4; i < bytes_per_line * screen_h; i++) {
-            ((unsigned char*)lfb_ptr)[i] = s_buf[i];
+            ((unsigned char*)d)[i] = s_buf[i];
         }
     } else {
         for (int y = 0; y < screen_h; y++) {
             const unsigned char* s = s_buf + y * screen_pitch;
             unsigned char* d = (unsigned char*)lfb_ptr + y * screen_pitch;
             int dwords = bytes_per_line / 4;
-            if (dwords > 0) {
-                unsigned int src32 = (unsigned int)s;
-                unsigned int dst32 = (unsigned int)d;
-                asm volatile("cld; rep movsl"
-                             : "+S"(src32), "+D"(dst32), "+c"(dwords)
-                             :
-                             : "memory");
-                s = (const unsigned char*)src32;
-                d = (unsigned char*)dst32;
-                s -= dwords * 4;
-                d -= dwords * 4;
+            for (int i = 0; i < dwords; i++) {
+                ((unsigned int*)d)[i] = ((const unsigned int*)s)[i];
             }
             for (int i = dwords * 4; i < bytes_per_line; i++) {
                 d[i] = s[i];
@@ -625,7 +569,7 @@ void kernel_main(void)
     splash_run();
 
     unsigned char* v = backbuffer;
-    int mx, my, mb, last_mx = -1, last_my = -1;
+    int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
 
     settings_init();
     settings_load();
@@ -648,7 +592,6 @@ void kernel_main(void)
     mouse_get(&mx, &my, &mb);
     int hardware_cursor = gfx_accel_has_hardware_cursor();
     if (hardware_cursor) gfx_accel_set_cursor(mx, my, 1);
-    int pending_cursor_reset = 0;
 
     while (1) {
         audio_poll();
@@ -658,44 +601,25 @@ void kernel_main(void)
 
         ps2_poll_input();
         mouse_get(&mx, &my, &mb);
+        int mb_press = (mb & 1) && !(last_mb & 1);
+        int mb_release = !(mb & 1) && (last_mb & 1);
+        last_mb = mb;
 
-        mouse_button_event_t events[16];
-        int event_count = 0;
-        int has_press = 0;
-        while (event_count < 16 &&
-               mouse_take_button_event(&events[event_count])) {
-            if (events[event_count].pressed) has_press = 1;
-            event_count++;
-        }
-
+        int mr = wm_need_mouse_reset();
         int moved = (mx != last_mx || my != last_my);
-        int cursor_changed = moved || has_press || pending_cursor_reset;
-        int cursor_restored = 0;
-        pending_cursor_reset = 0;
-        if (wm_need_mouse_reset()) cursor_changed = 1;
 
-        /*
-         * Restore the 2012.160 cursor model: keep the saved cursor in the
-         * backbuffer, remove it before input/redraw work, and redraw it after
-         * the frame is ready. This also protects direct drag/resize overlays.
-         */
-        if (!hardware_cursor && cursor_changed) {
-            mouse_reset(v);
-            cursor_restored = 1;
+        if (!hardware_cursor && (mr || moved)) {
             if (last_mx >= 0) {
-                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
-                                     0, 0, 0, 0);
+                mouse_reset(v);
+                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
             }
         }
 
-        for (int i = 0; i < event_count; i++) {
-            wm_set_input_event_tick(events[i].tick);
-            wm_update(v, events[i].x, events[i].y, events[i].buttons,
-                      events[i].pressed, events[i].released);
+        wm_update(v, mx, my, mb, mb_press, mb_release);
+        int new_mr = wm_need_mouse_reset();
+        if (new_mr) {
+            mr = 1;
         }
-        wm_set_input_event_tick(-1);
-        wm_update(v, mx, my, mb, 0, 0);
-        pending_cursor_reset = wm_need_mouse_reset();
         
         extern int redraw;
         int need_full_copy = redraw || (last_mx == -1);
@@ -705,27 +629,19 @@ void kernel_main(void)
         if (hardware_cursor) {
             if (need_full_copy) {
                 copy_fullscreen_to_lfb(v);
+                last_mx = mx; last_my = my;
             }
             gfx_accel_set_cursor(mx, my, 1);
         } else if (need_full_copy) {
-            /*
-             * Rebuild the frame and then draw the cursor into the backbuffer
-             * before presenting it. A full copy therefore never removes the
-             * cursor for the duration of the redraw.
-             */
+            extern void mouse_invalidate(void);
             mouse_invalidate();
             mouse_draw(v);
             copy_fullscreen_to_lfb(v);
-        } else if (cursor_changed) {
-            if (!cursor_restored && last_mx >= 0) {
-                mouse_reset(v);
-                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
-                                     0, 0, 0, 0);
-            }
+            last_mx = mx; last_my = my;
+        } else if (mr || moved) {
             mouse_draw(v);
-            copy_rect_to_lfb_raw(v, mx, my, 16, 16, 0, 0, 0, 0);
-            present_cursor_rects(last_mx, last_my, mx, my);
+            copy_rect_to_lfb(v, mx, my, 16, 16);
+            last_mx = mx; last_my = my;
         }
-        last_mx = mx; last_my = my;
     }
 }
