@@ -20,8 +20,12 @@ jobs:
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-multilib nasm grub-pc-bin grub-common xorriso mtools dos2unix zip
+        export DEBIAN_FRONTEND=noninteractive
+        timeout 180s sudo apt-get -o Acquire::Retries=2 \
+          -o Acquire::http::Timeout=20 \
+          -o Acquire::https::Timeout=20 update || true
+        sudo apt-get install -y gcc-multilib nasm grub-pc-bin grub-common \
+          xorriso mtools dos2unix zip
 
     - name: Ensure Unix line endings and permissions
       run: |
