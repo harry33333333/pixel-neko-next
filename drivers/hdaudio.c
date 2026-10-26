@@ -599,8 +599,13 @@ static unsigned int hda_amp_payload(unsigned int caps, int volume,
     if (volume <= 0) {
         volume = 0;
         index = steps;
-    } else if (volume < 100 && steps) {
-        index = (steps * (unsigned int)(100 - volume) + 99U) / 100U;
+    } else if (steps) {
+        if ((g_controller_id >> 16) == 0x15AD) {
+            /* VMware HDA codec uses increasing amp index as increasing gain. */
+            index = (steps * (unsigned int)volume + 50U) / 100U;
+        } else if (volume < 100) {
+            index = (steps * (unsigned int)(100 - volume) + 99U) / 100U;
+        }
     }
     unsigned int payload = HDA_AMP_LEFT | HDA_AMP_RIGHT |
                            (index & 0x7FU);
@@ -888,12 +893,25 @@ static void hda_stream_reset(void)
     unsigned int control = hda_read32(g_stream_base + HDA_SD_CTL);
     hda_write32(g_stream_base + HDA_SD_CTL,
                 control & ~(HDA_SD_RUN | HDA_SD_RESET));
-    hda_delay();
+    int stopped = 0;
+    for (int i = 0; i < HDA_WAIT_LOOPS; i++) {
+        if (!(hda_read32(g_stream_base + HDA_SD_CTL) & HDA_SD_RUN)) {
+            stopped = 1;
+            break;
+        }
+        hda_delay();
+    }
+    if (!stopped) log_write("[HDA ] stream RUN did not clear\n");
     hda_write32(g_stream_base + HDA_SD_CTL,
                 hda_read32(g_stream_base + HDA_SD_CTL) | HDA_SD_RESET);
     for (int i = 0; i < 1000; i++) hda_delay();
     hda_write32(g_stream_base + HDA_SD_CTL,
                 hda_read32(g_stream_base + HDA_SD_CTL) & ~HDA_SD_RESET);
+    for (int i = 0; i < HDA_WAIT_LOOPS; i++) {
+        if (!(hda_read32(g_stream_base + HDA_SD_CTL) & HDA_SD_RESET)) break;
+        hda_delay();
+    }
+    hda_write8(g_stream_base + HDA_SD_STS, HDA_SD_ERRORS);
 }
 
 void hdaudio_set_format(int rate, int bits, int stereo)
@@ -920,6 +938,8 @@ void hdaudio_set_format(int rate, int bits, int stereo)
 void hdaudio_start_dma(void)
 {
     if (!g_present || !dma_is_valid(&g_pcm) || !dma_is_valid(&g_bdl)) return;
+    if (g_running) hdaudio_stop_dma();
+    hda_init_bdl();
     hda_stream_reset();
     hda_write32(g_stream_base + HDA_SD_CBL, HDA_DMA_BYTES);
     hda_write16(g_stream_base + HDA_SD_LVI,
@@ -947,22 +967,30 @@ void hdaudio_start_dma(void)
     g_paused = 0;
     g_last_current_half = 0;
     hda_apply_volume();
+    log_printf("[HDA ] stream start tag=%u rate=%u BDL=0x%X PCM=0x%X\n",
+               (unsigned int)HDA_STREAM_TAG, (unsigned int)g_rate,
+               g_bdl.phys, g_pcm.phys);
 }
 
 void hdaudio_stop_dma(void)
 {
     if (!g_present) return;
+    g_running = 0;
+    g_paused = 0;
     hda_write32(g_stream_base + HDA_SD_CTL,
                 hda_read32(g_stream_base + HDA_SD_CTL) & ~HDA_SD_RUN);
-    hda_stream_reset();
+    for (int i = 0; i < HDA_WAIT_LOOPS; i++) {
+        if (!(hda_read32(g_stream_base + HDA_SD_CTL) & HDA_SD_RUN)) break;
+        hda_delay();
+    }
     int converter = g_best_route[0];
     if (converter >= 0 && converter < g_widget_count) {
         hda_command(g_codec_addr, g_widgets[converter].nid,
                     HDA_VERB_SET_CHANNEL_STREAM, 0, 0);
     }
-    g_running = 0;
-    g_paused = 0;
+    hda_stream_reset();
     g_last_current_half = -1;
+    log_write("[HDA ] stream stopped and reset\n");
 }
 
 void hdaudio_pause_dma(int pause)
