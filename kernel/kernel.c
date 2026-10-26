@@ -164,13 +164,15 @@ static void set_vga_palette_full(const struct vbe_mode_info* info, int is_direct
 }
 
 
-void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
+static int copy_rect_to_lfb_raw(const unsigned char* src, int rx, int ry,
+                                int rw, int rh, int* nx, int* ny,
+                                int* nw, int* nh)
 {
     if (rx < 0) { rw += rx; rx = 0; }
     if (ry < 0) { rh += ry; ry = 0; }
     if (rx + rw > screen_w) rw = screen_w - rx;
     if (ry + rh > screen_h) rh = screen_h - ry;
-    if (rw <= 0 || rh <= 0) return;
+    if (rw <= 0 || rh <= 0) return 0;
 
     int bytes_per_pixel = (screen_bpp <= 8) ? 1 : ((screen_bpp <= 16) ? 2 : ((screen_bpp <= 24) ? 3 : 4));
     int line_bytes = rw * bytes_per_pixel;
@@ -197,7 +199,42 @@ void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
             d[i] = s[i];
         }
     }
-    gfx_accel_present_rect(rx, ry, rw, rh);
+
+    if (nx) *nx = rx;
+    if (ny) *ny = ry;
+    if (nw) *nw = rw;
+    if (nh) *nh = rh;
+    return 1;
+}
+
+void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
+{
+    int nx, ny, nw, nh;
+    if (copy_rect_to_lfb_raw(src, rx, ry, rw, rh, &nx, &ny, &nw, &nh)) {
+        gfx_accel_present_rect(nx, ny, nw, nh);
+    }
+}
+
+static void present_cursor_rects(int old_x, int old_y, int new_x, int new_y)
+{
+    if (old_x < 0) {
+        gfx_accel_present_rect(new_x, new_y, 16, 16);
+        return;
+    }
+
+    int overlap = old_x < new_x + 16 && new_x < old_x + 16 &&
+                  old_y < new_y + 16 && new_y < old_y + 16;
+    if (!overlap) {
+        gfx_accel_present_rect(old_x, old_y, 16, 16);
+        gfx_accel_present_rect(new_x, new_y, 16, 16);
+        return;
+    }
+
+    int left = old_x < new_x ? old_x : new_x;
+    int top = old_y < new_y ? old_y : new_y;
+    int right = old_x > new_x ? old_x + 16 : new_x + 16;
+    int bottom = old_y > new_y ? old_y + 16 : new_y + 16;
+    gfx_accel_present_rect(left, top, right - left, bottom - top);
 }
 
 void copy_fullscreen_to_lfb(const unsigned char* s_buf)
@@ -588,7 +625,7 @@ void kernel_main(void)
     splash_run();
 
     unsigned char* v = backbuffer;
-    int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
+    int mx, my, mb, last_mx = -1, last_my = -1;
 
     settings_init();
     settings_load();
@@ -620,12 +657,18 @@ void kernel_main(void)
 
         ps2_poll_input();
         mouse_get(&mx, &my, &mb);
-        int mb_press = (mb & 1) && !(last_mb & 1);
-        int mb_release = !(mb & 1) && (last_mb & 1);
-        last_mb = mb;
+
+        mouse_button_event_t events[16];
+        int event_count = 0;
+        int has_press = 0;
+        while (event_count < 16 &&
+               mouse_take_button_event(&events[event_count])) {
+            if (events[event_count].pressed) has_press = 1;
+            event_count++;
+        }
 
         int moved = (mx != last_mx || my != last_my);
-        int cursor_changed = moved;
+        int cursor_changed = moved || has_press;
         int cursor_restored = 0;
         if (wm_need_mouse_reset()) cursor_changed = 1;
 
@@ -634,14 +677,21 @@ void kernel_main(void)
          * LFB. Hide the software cursor before those handlers run so their
          * output cannot be erased when the old cursor rectangle is restored.
          */
-        if (!hardware_cursor && (mb & 1) &&
-            (mb_press || cursor_changed) && last_mx >= 0) {
-            copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+        if (!hardware_cursor && (mb & 1 || has_press) &&
+            cursor_changed && last_mx >= 0) {
+            copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
+                                 0, 0, 0, 0);
             cursor_restored = 1;
             cursor_changed = 1;
         }
 
-        wm_update(v, mx, my, mb, mb_press, mb_release);
+        for (int i = 0; i < event_count; i++) {
+            wm_set_input_event_tick(events[i].tick);
+            wm_update(v, events[i].x, events[i].y, events[i].buttons,
+                      events[i].pressed, events[i].released);
+        }
+        wm_set_input_event_tick(-1);
+        wm_update(v, mx, my, mb, 0, 0);
         int new_mr = wm_need_mouse_reset();
         if (new_mr) {
             cursor_changed = 1;
@@ -664,7 +714,8 @@ void kernel_main(void)
              * surfaces first, then remove it from the clean backbuffer again.
              */
             if (last_mx >= 0 && !cursor_restored) {
-                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
+                                     0, 0, 0, 0);
             }
             mouse_invalidate();
             mouse_draw(v);
@@ -677,9 +728,11 @@ void kernel_main(void)
              * prepared, so a slow redraw never leaves the pointer invisible.
              */
             if (last_mx >= 0 && !cursor_restored) {
-                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
+                                     0, 0, 0, 0);
             }
             mouse_draw_lfb_overlay();
+            present_cursor_rects(last_mx, last_my, mx, my);
         }
         last_mx = mx; last_my = my;
     }

@@ -548,9 +548,12 @@ void vmware_svga_present_rect(int x, int y, int width, int height)
     command[2] = (unsigned int)y;
     command[3] = (unsigned int)width;
     command[4] = (unsigned int)height;
-    if (svga_fifo_emit(command, 5)) {
-        vmware_svga_sync();
-    } else {
+    /*
+     * UPDATE is asynchronous. Waiting for SVGA_REG_BUSY on every dirty
+     * rectangle turns cursor motion into tens of host round-trips per second.
+     * FIFO capacity checks still sync only when the command ring is full.
+     */
+    if (!svga_fifo_emit(command, 5)) {
         g_fifo_ready = 0;
         g_status = "FIFO full (linear framebuffer fallback)";
     }
