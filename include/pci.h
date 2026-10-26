@@ -41,6 +41,8 @@ unsigned int pci_enable_io(const pci_device_t* dev);
 unsigned int pci_enable_memory(const pci_device_t* dev);
 unsigned int pci_enable_bus_master(const pci_device_t* dev);
 unsigned int pci_get_bar_size(const pci_device_t* dev, int bar);
+unsigned char pci_find_capability(const pci_device_t* dev,
+                                  unsigned char capability);
 const char* pci_class_name(unsigned char class_code, unsigned char subclass);
 
 #endif

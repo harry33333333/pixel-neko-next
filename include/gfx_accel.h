@@ -10,6 +10,7 @@ int          gfx_accel_is_active(void);
 const char*  gfx_accel_get_name(void);
 const char*  gfx_accel_get_status(void);
 const char*  gfx_accel_get_fallback_reason(void);
+int          gfx_accel_is_hardware_2d_active(void);
 unsigned int gfx_accel_get_vram_size(void);
 int          gfx_accel_supports_bpp(int w, int h, int bpp);
 int          gfx_accel_try_set_mode(int w, int h, int bpp);

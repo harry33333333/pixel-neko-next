@@ -248,6 +248,30 @@ unsigned int pci_get_bar_size(const pci_device_t* dev, int bar)
     return (~mask) + 1U;
 }
 
+unsigned char pci_find_capability(const pci_device_t* dev,
+                                  unsigned char capability)
+{
+    if (!dev) return 0;
+    unsigned int status =
+        pci_config_read(dev->bus, dev->slot, dev->function, 0x04);
+    if (!(status & (1U << 20))) return 0;
+    unsigned char pointer =
+        (unsigned char)(pci_config_read(dev->bus, dev->slot, dev->function,
+                                        0x34) & 0xFCU);
+    if (!pointer) return 0;
+
+    for (int i = 0; i < 32 && pointer >= 0x40; i++) {
+        unsigned int word =
+            pci_config_read(dev->bus, dev->slot, dev->function,
+                            (unsigned char)(pointer & 0xFCU));
+        unsigned char id = (unsigned char)((word >> ((pointer & 3) * 8)) & 0xFF);
+        if (id == capability) return pointer;
+        pointer = (unsigned char)((word >> (((pointer & 3) + 1) * 8)) & 0xFC);
+        if (!pointer) break;
+    }
+    return 0;
+}
+
 const char* pci_class_name(unsigned char class_code, unsigned char subclass)
 {
     if (class_code == 0x03) return "Display Controller";

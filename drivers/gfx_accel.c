@@ -1,6 +1,7 @@
 #include "gfx_accel.h"
 #include "ati_mach64.h"
 #include "vmware_svga.h"
+#include "nvidia_g7x.h"
 #include "driver.h"
 #include "log.h"
 #include "irq.h"
@@ -25,6 +26,7 @@ typedef struct {
 #define GFX_BACKEND_SOFTWARE 0
 #define GFX_BACKEND_VMWARE   1
 #define GFX_BACKEND_ATI      2
+#define GFX_BACKEND_NVIDIA   3
 
 static int g_initialized;
 static int g_drivers_registered;
@@ -42,6 +44,11 @@ static void backend_ati_fill(int x, int y, int width, int height,
                              unsigned int color);
 static void backend_ati_copy(int sx, int sy, int dx, int dy,
                              int width, int height);
+static void backend_nvidia_present(int x, int y, int width, int height);
+static void backend_nvidia_fill(int x, int y, int width, int height,
+                                unsigned int color);
+static void backend_nvidia_copy(int sx, int sy, int dx, int dy,
+                                int width, int height);
 static void backend_software_present(int x, int y, int width, int height);
 static void backend_software_fill(int x, int y, int width, int height,
                                   unsigned int color);
@@ -64,6 +71,15 @@ static const gfx_backend_t g_ati_backend = {
     backend_ati_fill,
     backend_ati_copy,
     ati_mach64_sync
+};
+
+static const gfx_backend_t g_nvidia_backend = {
+    "NVIDIA G7x PCIe",
+    GFX_BACKEND_NVIDIA,
+    backend_nvidia_present,
+    backend_nvidia_fill,
+    backend_nvidia_copy,
+    nvidia_g7x_sync
 };
 
 static const gfx_backend_t g_software_backend = {
@@ -95,6 +111,11 @@ static int probe_ati_mach64(void)
     return 1;
 }
 
+static int probe_nvidia_g7x(void)
+{
+    return nvidia_g7x_probe();
+}
+
 static const driver_descriptor_t g_vmware_driver = {
     "VMware SVGA II",
     DRIVER_CATEGORY_DISPLAY,
@@ -113,10 +134,20 @@ static const driver_descriptor_t g_ati_driver = {
     0
 };
 
+static const driver_descriptor_t g_nvidia_driver = {
+    "NVIDIA G7x PCIe",
+    DRIVER_CATEGORY_DISPLAY,
+    80,
+    probe_nvidia_g7x,
+    0,
+    0
+};
+
 static void register_gfx_drivers(void)
 {
     if (g_drivers_registered) return;
     driver_register(&g_vmware_driver);
+    driver_register(&g_nvidia_driver);
     driver_register(&g_ati_driver);
     g_drivers_registered = 1;
 }
@@ -134,6 +165,11 @@ void gfx_accel_init(void)
             g_backend = &g_svga_backend;
             g_backend_kind = GFX_BACKEND_VMWARE;
             g_fallback_reason = "None";
+        } else if (driver_is_active(DRIVER_CATEGORY_DISPLAY,
+                                    "NVIDIA G7x PCIe")) {
+            g_backend = &g_nvidia_backend;
+            g_backend_kind = GFX_BACKEND_NVIDIA;
+            g_fallback_reason = "None";
         } else if (driver_is_active(DRIVER_CATEGORY_DISPLAY, "ATI Mach64")) {
             g_backend = &g_ati_backend;
             g_backend_kind = GFX_BACKEND_ATI;
@@ -143,7 +179,8 @@ void gfx_accel_init(void)
 
     g_initialized = 1;
     if (g_backend_kind == GFX_BACKEND_SOFTWARE) {
-        g_fallback_reason = "VMware SVGA II and ATI Mach64 unavailable";
+        g_fallback_reason =
+            "VMware SVGA II, NVIDIA G7x and ATI Mach64 unavailable";
         log_printf("[GFX ] falling back to software VBE backend\n");
     } else {
         log_printf("[GFX ] active backend: %s, status: %s\n",
@@ -165,6 +202,9 @@ const char* gfx_accel_get_name(void)
     if (g_backend_kind == GFX_BACKEND_ATI) {
         return ati_mach64_get_chip_name();
     }
+    if (g_backend_kind == GFX_BACKEND_NVIDIA) {
+        return nvidia_g7x_get_name();
+    }
     return "Standard VBE (Software)";
 }
 
@@ -176,6 +216,9 @@ const char* gfx_accel_get_status(void)
     }
     if (g_backend_kind == GFX_BACKEND_ATI) {
         return "GUI accelerator active";
+    }
+    if (g_backend_kind == GFX_BACKEND_NVIDIA) {
+        return nvidia_g7x_get_status();
     }
     return g_fallback_reason;
 }
@@ -193,7 +236,17 @@ unsigned int gfx_accel_get_vram_size(void)
     if (g_backend_kind == GFX_BACKEND_ATI) {
         return ati_mach64_get_vram_size();
     }
+    if (g_backend_kind == GFX_BACKEND_NVIDIA) {
+        return nvidia_g7x_get_vram_size();
+    }
     return 2 * 1024 * 1024;
+}
+
+int gfx_accel_is_hardware_2d_active(void)
+{
+    return g_initialized &&
+           (g_backend_kind == GFX_BACKEND_VMWARE ||
+            g_backend_kind == GFX_BACKEND_ATI);
 }
 
 static int vbe_mode_available(int w, int h, int bpp)
@@ -332,6 +385,23 @@ static void backend_ati_copy(int sx, int sy, int dx, int dy,
                              int width, int height)
 {
     ati_mach64_screen_blt(sx, sy, dx, dy, width, height);
+}
+
+static void backend_nvidia_present(int x, int y, int width, int height)
+{
+    nvidia_g7x_present_rect(x, y, width, height);
+}
+
+static void backend_nvidia_fill(int x, int y, int width, int height,
+                                unsigned int color)
+{
+    nvidia_g7x_fill_rect(x, y, width, height, color);
+}
+
+static void backend_nvidia_copy(int sx, int sy, int dx, int dy,
+                                int width, int height)
+{
+    nvidia_g7x_screen_blt(sx, sy, dx, dy, width, height);
 }
 
 static void backend_software_present(int x, int y, int width, int height)

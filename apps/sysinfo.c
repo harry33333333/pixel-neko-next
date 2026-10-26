@@ -276,9 +276,12 @@ void sysinfo_draw(unsigned char* v, int wx, int wy, int ww, int wh) {
 
         ly += 16;
         font_draw_text(v, lx, ly, "2D Engine:", 0);
-        if (gfx_accel_is_active()) {
+        if (gfx_accel_is_hardware_2d_active()) {
             draw_text_fitted(v, value_x, ly, max_value_chars,
                              "Hardware 2D (Active)", 2);
+        } else if (gfx_accel_is_active()) {
+            draw_text_fitted(v, value_x, ly, max_value_chars,
+                             "Software 2D (Native LFB)", 8);
         } else {
             draw_text_fitted(v, value_x, ly, max_value_chars,
                              "Software Rasterizer (Fallback)", 8);
