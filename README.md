@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Architecture](https://img.shields.io/badge/Arch-x86--32-blue.svg)](https://en.wikipedia.org/wiki/IA-32)
 [![Boot](https://img.shields.io/badge/Boot-Multiboot%20%2F%20GRUB-green.svg)](https://www.gnu.org/software/grub/)
-[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.150)-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.160)-brightgreen.svg)]()
 
 **Pixel Neko Next** 是一个轻量级、开箱即用的 x86-32 位原生微桌面操作系统（Bare-metal GUI OS）。系统完全基于 C 语言与 NASM 汇编从零编写，具备高分辨率图形桌面、完整的窗口管理器、Windows 驱动器盘符映射、ISO9660 光盘文件系统、FAT12/16/32 文件系统、原生软驱驱动、丰富的内置应用程序以及极致复古的经典开机与关机停机体验。
 
@@ -171,6 +171,17 @@
 - **🔇 关机停机画面静音与 DMA 彻底停止**：在退出系统进入经典 Safe to Turn Off 画面及重启前立即切断声卡 DMA 环形缓冲与静音输出，彻底消除关机停机时的硬件残余卡碟循环循环。
 - **💽 Intel H55 (ASUS P7H55-M LE) SATA / IDE Native PCI 驱动器自适应探测**：新增 PCI 存储控制器（Class 0101）全面枚举与 BAR0~BAR3 Native PCI I/O 端口识别，解决现代与近现代主板兼容 IDE 模式下找不到硬盘与光驱的问题。
 - **🏷️ 开机画面与系统内核版本号迭代同步**：开机 Boot Splash 及系统关于视窗全面联动动态版本号，正式迭代至 `Build 2010.010`。
+
+---
+
+## 💾 Build 2012.160 更新特性
+- **🖥️ NVIDIA 7300 GT 显示能力扩展**：
+  - 放宽 NVIDIA G7x 探测条件，优先使用 VBE LFB，同时读取 BAR1、PCIe Capability 和 VBE VRAM 信息；
+  - 通过 VBE Controller Info 识别实际显存，并在回退时使用 G73 256MB 作为安全基准；
+  - 新增 1280×1024 分辨率，仅对 `10DE:0393/0395` GeForce 7300 GT 开放；
+  - 1280×1024 只提供 32bpp 模式，VMware SVGA、ATI Mach64 和通用 VBE 不可选择该模式；
+  - Backbuffer 扩展至 1280×1024×32，cpanel 动态加入第五个分辨率选项；
+  - NVIDIA 当前仍使用安全软件 2D；GPU PGRAPH/FIFO 硬件 2D 方法尚未启用。
 
 ---
 

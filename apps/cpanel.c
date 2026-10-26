@@ -21,9 +21,11 @@ static int sel_bpp_idx = 1; // Default 16-bit
 static int res_dropdown_open = 0;
 static int bpp_dropdown_open = 0;
 
-static const int res_w[4] = { 320, 640, 800, 1024 };
-static const int res_h[4] = { 200, 480, 600, 768 };
-static const char* res_names[4] = { "320 x 200", "640 x 480", "800 x 600", "1024 x 768" };
+static const int res_w[5] = { 320, 640, 800, 1024, 1280 };
+static const int res_h[5] = { 200, 480, 600, 768, 1024 };
+static const char* res_names[5] = {
+    "320 x 200", "640 x 480", "800 x 600", "1024 x 768", "1280 x 1024"
+};
 
 static const int bpp_vals[4] = { 8, 16, 24, 32 };
 static const char* bpp_names[4] = { "8-bit  (256 Col)", "16-bit (HighCol)", "24-bit (TrueCol)", "32-bit (TrueCol)" };
@@ -32,6 +34,11 @@ static const char* pat_names[6] = {
     "0: Stipple 50%", "1: Diagonal", "2: Micro Dots",
     "3: Brick Tile", "4: Slate Gray", "5: Solid Gray"
 };
+
+static int available_resolution_count(void)
+{
+    return gfx_accel_supports_1280x1024() ? 5 : 4;
+}
 
 static unsigned char cmos_get_sec(void) {
     int timeout = 10000;
@@ -66,7 +73,7 @@ void cpanel_init(void)
     slider_val = mouse_get_speed();
 
     // Match current resolution & bpp
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < available_resolution_count(); i++) {
         if (screen_w == res_w[i] && screen_h == res_h[i]) sel_res_idx = i;
     }
     for (int i = 0; i < 4; i++) {
@@ -176,11 +183,12 @@ void cpanel_draw(unsigned char* v, int wx, int wy, int ww, int wh)
 
     // 7. Draw Dropdown Menus if Open (Rendered on top)
     if (res_dropdown_open) {
-        int dx = wx+120, dy = wy+68, dw = 160, dh = 4 * 18 + 2;
+        int res_count = available_resolution_count();
+        int dx = wx+120, dy = wy+68, dw = 160, dh = res_count * 18 + 2;
         for(int y=dy; y<dy+dh; y++) for(int x=dx; x<dx+dw; x++) PUT_PIXEL(v, x, y, 15);
         for(int x=dx; x<dx+dw; x++) { PUT_PIXEL(v, x, dy, 0); PUT_PIXEL(v, x, dy+dh-1, 0); }
         for(int y=dy; y<dy+dh; y++) { PUT_PIXEL(v, dx, y, 0); PUT_PIXEL(v, dx+dw-1, y, 0); }
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < res_count; i++) {
             int iy = dy + 1 + i * 18;
             if (i == sel_res_idx) {
                 for(int y=iy; y<iy+18; y++) for(int x=dx+1; x<dx+dw-1; x++) PUT_PIXEL(v, x, y, 9);
@@ -219,13 +227,15 @@ void cpanel_click(unsigned char* v, int mx, int my, int wx, int wy, int ww, int 
 
     // Handle open Dropdown clicks first
     if (res_dropdown_open) {
+        int res_count = available_resolution_count();
         int dx = wx+120, dy = wy+68, dw = 160;
-        if (mx >= dx && mx < dx+dw && my >= dy && my < dy + 4*18) {
+        if (mx >= dx && mx < dx+dw && my >= dy && my < dy + res_count*18) {
             int idx = (my - dy) / 18;
-            if (idx >= 0 && idx < 4) {
+            if (idx >= 0 && idx < res_count) {
                 sel_res_idx = idx;
-                // If current selected bpp is not valid for new resolution, fall back
-                if (!gfx_accel_supports_bpp(res_w[sel_res_idx], res_h[sel_res_idx], bpp_vals[sel_bpp_idx])) {
+                if (res_w[sel_res_idx] == 1280) {
+                    sel_bpp_idx = 3; // 1280x1024 is exposed only as 32-bit.
+                } else if (!gfx_accel_supports_bpp(res_w[sel_res_idx], res_h[sel_res_idx], bpp_vals[sel_bpp_idx])) {
                     sel_bpp_idx = 1; // Try 16-bit
                     if (!gfx_accel_supports_bpp(res_w[sel_res_idx], res_h[sel_res_idx], bpp_vals[sel_bpp_idx])) {
                         sel_bpp_idx = 0; // Fallback to 8-bit

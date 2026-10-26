@@ -249,6 +249,12 @@ int gfx_accel_is_hardware_2d_active(void)
             g_backend_kind == GFX_BACKEND_ATI);
 }
 
+int gfx_accel_supports_1280x1024(void)
+{
+    return g_backend_kind == GFX_BACKEND_NVIDIA &&
+           nvidia_g7x_supports_1280x1024();
+}
+
 static int vbe_mode_available(int w, int h, int bpp)
 {
     extern int vbe_find_mode(int w, int h, int bpp);
@@ -267,6 +273,14 @@ int gfx_accel_supports_bpp(int w, int h, int bpp)
         (unsigned int)w * (unsigned int)h * bytes_per_pixel;
     unsigned int max_vram = gfx_accel_get_vram_size();
     if (w <= 0 || h <= 0 || vram_needed > max_vram) return 0;
+
+    if (w == 1280 || h == 1024) {
+        if (w != 1280 || h != 1024 || bpp != 32 ||
+            !gfx_accel_supports_1280x1024()) {
+            return 0;
+        }
+        return vbe_mode_available(1280, 1024, 32);
+    }
 
     if (g_backend_kind == GFX_BACKEND_VMWARE) {
         return vmware_svga_supports_mode(w, h, bpp);

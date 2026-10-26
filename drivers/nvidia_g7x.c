@@ -20,6 +20,7 @@ extern int screen_bpp;
 extern int screen_pitch;
 extern unsigned char* lfb;
 extern unsigned int lfb_ptr;
+extern int vbe_get_controller_info(void);
 
 static const pci_device_t* g_pci;
 static int g_active;
@@ -27,6 +28,7 @@ static unsigned int g_vram_size;
 static unsigned int g_bar0;
 static unsigned int g_bar1;
 static unsigned int g_bar1_size;
+static int g_primary_7300gt;
 static const char* g_name = "NVIDIA PCIe";
 static const char* g_status = "Not detected";
 
@@ -47,6 +49,18 @@ static int nvidia_framebuffer_in_bar(unsigned int framebuffer,
     return 1;
 }
 
+static unsigned int nvidia_vbe_vram_size(void)
+{
+    if (vbe_get_controller_info() != 0x004F) return 0;
+    unsigned char* block = (unsigned char*)0x8800;
+    if (block[0] != 'V' || block[1] != 'E' ||
+        block[2] != 'S' || block[3] != 'A') {
+        return 0;
+    }
+    unsigned short blocks = *(unsigned short*)(block + 18);
+    return (unsigned int)blocks * 64U * 1024U;
+}
+
 int nvidia_g7x_probe(void)
 {
     g_active = 0;
@@ -55,6 +69,7 @@ int nvidia_g7x_probe(void)
     g_bar0 = 0;
     g_bar1 = 0;
     g_bar1_size = 0;
+    g_primary_7300gt = 0;
     g_status = "NVIDIA G7x PCIe device not found";
 
     pci_scan_all();
@@ -67,10 +82,12 @@ int nvidia_g7x_probe(void)
             case PCI_DEV_7300GT_G73:
                 g_name = "NVIDIA GeForce 7300 GT (G73 PCIe)";
                 vram = 256U * 1024U * 1024U;
+                g_primary_7300gt = 1;
                 break;
             case PCI_DEV_7300GT_G73_B:
                 g_name = "NVIDIA GeForce 7300 GT (G73 PCIe)";
                 vram = 256U * 1024U * 1024U;
+                g_primary_7300gt = 1;
                 break;
             case PCI_DEV_6200LE_NV44:
                 g_name = "NVIDIA GeForce 6200 LE (NV44 PCIe)";
@@ -86,43 +103,38 @@ int nvidia_g7x_probe(void)
         }
 
         unsigned char pcie = pci_find_capability(dev, PCI_CAP_ID_EXP);
-        if (!pcie) {
-            log_printf("[NV  ] skipping non-PCIe %X:%X rev=%u\n",
-                       dev->vendor, dev->device, dev->revision);
-            continue;
+        unsigned int bar_size = 0;
+        if (dev->bar_valid[1] && !dev->bar_is_io[1]) {
+            bar_size = pci_get_bar_size(dev, 1);
         }
-        if (!dev->bar_valid[0] || dev->bar_is_io[0] ||
-            !dev->bar_valid[1] || dev->bar_is_io[1]) {
-            log_printf("[NV  ] %X:%X has unsupported BAR layout\n",
-                       dev->vendor, dev->device);
-            continue;
-        }
-
-        unsigned int bar_size = pci_get_bar_size(dev, 1);
         if (vram && bar_size < (64U * 1024U * 1024U)) {
             bar_size = vram;
-        }
-        if (!nvidia_framebuffer_in_bar(lfb_ptr, bar_size)) {
-            log_printf("[NV  ] VBE LFB 0x%X outside BAR1 0x%X size=0x%X\n",
-                       lfb_ptr, dev->bar[1], bar_size);
-            continue;
         }
         if (!lfb || screen_w <= 0 || screen_h <= 0 || screen_pitch <= 0) {
             continue;
         }
 
-        pci_enable_memory(dev);
-        pci_enable_bus_master(dev);
+        if (dev->bar_valid[0] && !dev->bar_is_io[0] &&
+            dev->bar_valid[1] && !dev->bar_is_io[1]) {
+            pci_enable_memory(dev);
+            pci_enable_bus_master(dev);
+        }
         g_pci = dev;
-        g_bar0 = dev->bar[0];
-        g_bar1 = dev->bar[1];
+        g_bar0 = dev->bar_valid[0] ? dev->bar[0] : 0;
+        g_bar1 = dev->bar_valid[1] ? dev->bar[1] : 0;
         g_bar1_size = bar_size;
-        g_vram_size = vram ? vram : bar_size;
+        unsigned int vbe_vram = nvidia_vbe_vram_size();
+        g_vram_size = vbe_vram ? vbe_vram : (vram ? vram : bar_size);
         g_active = 1;
-        g_status = "PCIe native LFB; software 2D fallback";
-        log_printf("[NV  ] active %s id=%X:%X rev=%X BAR0=%X BAR1=%X size=%uMB\n",
-                   g_name, dev->vendor, dev->device, dev->revision,
-                   g_bar0, g_bar1, g_vram_size / (1024U * 1024U));
+        if (g_bar1 && nvidia_framebuffer_in_bar(lfb_ptr, bar_size)) {
+            g_status = "PCIe BAR1 LFB; software 2D fallback";
+        } else {
+            g_status = "VBE aperture; software 2D fallback";
+        }
+        log_printf("[NV  ] active %s id=%X:%X rev=%X pcie=%X BAR0=%X BAR1=%X vbeLfb=%X vram=%uMB\n",
+                   g_name, dev->vendor, dev->device, dev->revision, pcie,
+                   g_bar0, g_bar1, lfb_ptr,
+                   g_vram_size / (1024U * 1024U));
         return 1;
     }
     return 0;
@@ -146,6 +158,11 @@ const char* nvidia_g7x_get_status(void)
 unsigned int nvidia_g7x_get_vram_size(void)
 {
     return g_vram_size;
+}
+
+int nvidia_g7x_supports_1280x1024(void)
+{
+    return g_active && g_primary_7300gt;
 }
 
 void nvidia_g7x_present_rect(int x, int y, int width, int height)

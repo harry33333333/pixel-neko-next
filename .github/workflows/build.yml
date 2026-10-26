@@ -88,6 +88,7 @@ jobs:
           - Build 2012.105 corrects VMware HDA volume direction and serializes stream teardown/restart for repeat playback.
           - Build 2012.106 applies the verified HDA gain direction to physical VIA VT1708S codecs as well as VMware.
           - Build 2012.150 adds safe NVIDIA G7x PCIe detection, PCIe/AGP filtering and native VBE LFB backend support for GeForce 7300 GT.
+          - Build 2012.160 exposes NVIDIA 7300 GT 1280x1024x32 with VBE VRAM detection while keeping large modes disabled on VBE, VMware and ATI backends.
         draft: false
         prerelease: false
         files: |

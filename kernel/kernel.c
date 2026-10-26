@@ -19,7 +19,7 @@ int screen_w = 320;
 int screen_h = 200;
 int screen_bpp = 8;
 int screen_pitch = 320;
-unsigned char backbuffer[1024 * 768 * 4];
+unsigned char backbuffer[1280 * 1024 * 4];
 unsigned int lfb_ptr = 0xA0000;
 unsigned char* lfb = (unsigned char*)0xA0000;
 unsigned short palette16[256];
@@ -355,7 +355,8 @@ int vbe_supports_mode(int w, int h, int bpp)
 static void set_resolution_locked(int w, int h, int bpp)
 {
     // Bounds check to ensure resolution fits within backbuffer
-    if (w <= 0 || h <= 0 || w > 1024 || h > 768) return;
+    if (w <= 0 || h <= 0 || w > 1280 || h > 1024) return;
+    if ((w > 1024 || h > 768) && !gfx_accel_supports_1280x1024()) return;
     int bpp_bytes = (bpp <= 8) ? 1 : ((bpp <= 16) ? 2 : ((bpp <= 24) ? 3 : 4));
     if ((unsigned int)(w * h * bpp_bytes) > sizeof(backbuffer)) return;
 
@@ -412,6 +413,9 @@ static void set_resolution_locked(int w, int h, int bpp)
             candidates[1] = 0x145; // Bochs/SeaBIOS 1024x768 32bpp
             candidates[2] = 0x139;
             num_candidates = 3;
+        } else if (w == 1280 && h == 1024) {
+            candidates[0] = 0x14A; // VESA 1280x1024 32bpp
+            num_candidates = 1;
         }
     } else if (bpp == 24) {
         int m = vbe_find_mode(w, h, 24);
