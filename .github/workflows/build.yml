@@ -94,6 +94,7 @@ jobs:
           - Build 2012.150 adds safe NVIDIA G7x PCIe detection, PCIe/AGP filtering and native VBE LFB backend support for GeForce 7300 GT.
           - Build 2012.160 exposes NVIDIA 7300 GT 1280x1024x32 with VBE VRAM detection while keeping large modes disabled on VBE, VMware and ATI backends.
           - Build 2012.165 enables all 1280x1024 color depths on GeForce 7300 GT, removes software-cursor trails and accelerates high-resolution framebuffer copies.
+          - Build 2012.166 fixes software-cursor flicker during full framebuffer redraws while preserving drag and resize feedback.
         draft: false
         prerelease: false
         files: |

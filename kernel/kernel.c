@@ -624,19 +624,27 @@ void kernel_main(void)
         int mb_release = !(mb & 1) && (last_mb & 1);
         last_mb = mb;
 
-        int mr = wm_need_mouse_reset();
         int moved = (mx != last_mx || my != last_my);
-        
-        if (!hardware_cursor && (mr || moved)) {
-            if (last_mx >= 0) {
-                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
-            }
+        int cursor_changed = moved;
+        int cursor_restored = 0;
+        if (wm_need_mouse_reset()) cursor_changed = 1;
+
+        /*
+         * Drag/resize handlers paint transient feedback directly into the
+         * LFB. Hide the software cursor before those handlers run so their
+         * output cannot be erased when the old cursor rectangle is restored.
+         */
+        if (!hardware_cursor && (mb & 1) &&
+            (mb_press || cursor_changed) && last_mx >= 0) {
+            copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+            cursor_restored = 1;
+            cursor_changed = 1;
         }
 
         wm_update(v, mx, my, mb, mb_press, mb_release);
         int new_mr = wm_need_mouse_reset();
         if (new_mr) {
-            mr = 1;
+            cursor_changed = 1;
         }
         
         extern int redraw;
@@ -649,11 +657,29 @@ void kernel_main(void)
                 copy_fullscreen_to_lfb(v);
             }
             gfx_accel_set_cursor(mx, my, 1);
-        } else {
-            extern void mouse_invalidate(void);
+        } else if (need_full_copy) {
+            /*
+             * Software cursors live only in the LFB. Keep them visible while
+             * the backbuffer is rebuilt and copied: paint the cursor into both
+             * surfaces first, then remove it from the clean backbuffer again.
+             */
+            if (last_mx >= 0 && !cursor_restored) {
+                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+            }
             mouse_invalidate();
-            if (need_full_copy) copy_fullscreen_to_lfb(v);
-            if (need_full_copy || mr || moved) mouse_draw_lfb_overlay();
+            mouse_draw(v);
+            mouse_draw_lfb_overlay();
+            copy_fullscreen_to_lfb(v);
+            mouse_reset(v);
+        } else if (cursor_changed) {
+            /*
+             * Defer removing the old cursor until the new frame has been
+             * prepared, so a slow redraw never leaves the pointer invisible.
+             */
+            if (last_mx >= 0 && !cursor_restored) {
+                copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
+            }
+            mouse_draw_lfb_overlay();
         }
         last_mx = mx; last_my = my;
     }
