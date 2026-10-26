@@ -96,6 +96,7 @@ jobs:
           - Build 2012.165 enables all 1280x1024 color depths on GeForce 7300 GT, removes software-cursor trails and accelerates high-resolution framebuffer copies.
           - Build 2012.166 fixes software-cursor flicker during full framebuffer redraws while preserving drag and resize feedback.
           - Build 2012.167 queues mouse button edges for reliable double-click, batches cursor updates, and removes synchronous waits from SVGA dirty-rectangle presentation.
+          - Build 2012.168 restores the smoother 2012.160 backbuffer cursor model while retaining queued click events and asynchronous SVGA presentation.
         draft: false
         prerelease: false
         files: |

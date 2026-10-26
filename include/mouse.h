@@ -15,7 +15,6 @@ void mouse_handle_byte(unsigned char d);
 void mouse_get(int* x, int* y, int* btn);
 int mouse_take_button_event(mouse_button_event_t* event);
 void mouse_draw(unsigned char* vga);
-void mouse_draw_lfb_overlay(void);
 void mouse_reset(unsigned char* vga);
 void mouse_invalidate(void);
 

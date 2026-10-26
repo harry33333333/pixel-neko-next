@@ -648,6 +648,7 @@ void kernel_main(void)
     mouse_get(&mx, &my, &mb);
     int hardware_cursor = gfx_accel_has_hardware_cursor();
     if (hardware_cursor) gfx_accel_set_cursor(mx, my, 1);
+    int pending_cursor_reset = 0;
 
     while (1) {
         audio_poll();
@@ -668,21 +669,23 @@ void kernel_main(void)
         }
 
         int moved = (mx != last_mx || my != last_my);
-        int cursor_changed = moved || has_press;
+        int cursor_changed = moved || has_press || pending_cursor_reset;
         int cursor_restored = 0;
+        pending_cursor_reset = 0;
         if (wm_need_mouse_reset()) cursor_changed = 1;
 
         /*
-         * Drag/resize handlers paint transient feedback directly into the
-         * LFB. Hide the software cursor before those handlers run so their
-         * output cannot be erased when the old cursor rectangle is restored.
+         * Restore the 2012.160 cursor model: keep the saved cursor in the
+         * backbuffer, remove it before input/redraw work, and redraw it after
+         * the frame is ready. This also protects direct drag/resize overlays.
          */
-        if (!hardware_cursor && (mb & 1 || has_press) &&
-            cursor_changed && last_mx >= 0) {
-            copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
-                                 0, 0, 0, 0);
+        if (!hardware_cursor && cursor_changed) {
+            mouse_reset(v);
             cursor_restored = 1;
-            cursor_changed = 1;
+            if (last_mx >= 0) {
+                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
+                                     0, 0, 0, 0);
+            }
         }
 
         for (int i = 0; i < event_count; i++) {
@@ -692,10 +695,7 @@ void kernel_main(void)
         }
         wm_set_input_event_tick(-1);
         wm_update(v, mx, my, mb, 0, 0);
-        int new_mr = wm_need_mouse_reset();
-        if (new_mr) {
-            cursor_changed = 1;
-        }
+        pending_cursor_reset = wm_need_mouse_reset();
         
         extern int redraw;
         int need_full_copy = redraw || (last_mx == -1);
@@ -709,29 +709,21 @@ void kernel_main(void)
             gfx_accel_set_cursor(mx, my, 1);
         } else if (need_full_copy) {
             /*
-             * Software cursors live only in the LFB. Keep them visible while
-             * the backbuffer is rebuilt and copied: paint the cursor into both
-             * surfaces first, then remove it from the clean backbuffer again.
+             * Rebuild the frame and then draw the cursor into the backbuffer
+             * before presenting it. A full copy therefore never removes the
+             * cursor for the duration of the redraw.
              */
-            if (last_mx >= 0 && !cursor_restored) {
-                copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
-                                     0, 0, 0, 0);
-            }
             mouse_invalidate();
             mouse_draw(v);
-            mouse_draw_lfb_overlay();
             copy_fullscreen_to_lfb(v);
-            mouse_reset(v);
         } else if (cursor_changed) {
-            /*
-             * Defer removing the old cursor until the new frame has been
-             * prepared, so a slow redraw never leaves the pointer invisible.
-             */
-            if (last_mx >= 0 && !cursor_restored) {
+            if (!cursor_restored && last_mx >= 0) {
+                mouse_reset(v);
                 copy_rect_to_lfb_raw(v, last_mx, last_my, 16, 16,
                                      0, 0, 0, 0);
             }
-            mouse_draw_lfb_overlay();
+            mouse_draw(v);
+            copy_rect_to_lfb_raw(v, mx, my, 16, 16, 0, 0, 0, 0);
             present_cursor_rects(last_mx, last_my, mx, my);
         }
         last_mx = mx; last_my = my;

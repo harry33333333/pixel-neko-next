@@ -18,7 +18,6 @@ static volatile unsigned int event_tail;
 
 static unsigned int saved[16][16];
 static int saved_x = -1, saved_y = -1;
-extern unsigned char* lfb;
 
 static const char* cursor_shape[16] = {
     "X               ",
@@ -227,27 +226,6 @@ void mouse_draw(unsigned char* vga)
             }
         }
     }
-}
-
-void mouse_draw_lfb_overlay(void)
-{
-    if (!lfb) return;
-    unsigned int flags = irq_save_flags();
-    int x = mx, y = my;
-    irq_restore_flags(flags);
-
-    for (int i = 0; i < 16; i++) {
-        for (int j = 0; j < 16; j++) {
-            char pixel = cursor_shape[i][j];
-            if (pixel == ' ') continue;
-            int px = x + j;
-            int py = y + i;
-            if (px < screen_w && py < screen_h) {
-                PUT_PIXEL(lfb, px, py, pixel == 'X' ? 15 : 0);
-            }
-        }
-    }
-    /* The caller batches the old and new cursor rectangles into one update. */
 }
 
 void mouse_reset(unsigned char* vga)
