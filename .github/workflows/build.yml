@@ -86,6 +86,7 @@ jobs:
           - Build 2012.103 fixes the HDA init return contract so the successfully routed codec is selected by the Audio HAL.
           - Build 2012.104 fixes the 16-byte HDA Buffer Descriptor List layout required for valid VMware audio DMA.
           - Build 2012.105 corrects VMware HDA volume direction and serializes stream teardown/restart for repeat playback.
+          - Build 2012.106 applies the verified HDA gain direction to physical VIA VT1708S codecs as well as VMware.
         draft: false
         prerelease: false
         files: |

@@ -600,8 +600,8 @@ static unsigned int hda_amp_payload(unsigned int caps, int volume,
         volume = 0;
         index = steps;
     } else if (steps) {
-        if ((g_controller_id >> 16) == 0x15AD) {
-            /* VMware HDA codec uses increasing amp index as increasing gain. */
+        if (g_is_via || (g_controller_id >> 16) == 0x15AD) {
+            /* VMware and VIA HDA codecs use increasing amp index as gain. */
             index = (steps * (unsigned int)volume + 50U) / 100U;
         } else if (volume < 100) {
             index = (steps * (unsigned int)(100 - volume) + 99U) / 100U;
