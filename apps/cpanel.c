@@ -233,12 +233,18 @@ void cpanel_click(unsigned char* v, int mx, int my, int wx, int wy, int ww, int 
             int idx = (my - dy) / 18;
             if (idx >= 0 && idx < res_count) {
                 sel_res_idx = idx;
-                if (res_w[sel_res_idx] == 1280) {
-                    sel_bpp_idx = 3; // 1280x1024 is exposed only as 32-bit.
-                } else if (!gfx_accel_supports_bpp(res_w[sel_res_idx], res_h[sel_res_idx], bpp_vals[sel_bpp_idx])) {
-                    sel_bpp_idx = 1; // Try 16-bit
-                    if (!gfx_accel_supports_bpp(res_w[sel_res_idx], res_h[sel_res_idx], bpp_vals[sel_bpp_idx])) {
-                        sel_bpp_idx = 0; // Fallback to 8-bit
+                if (!gfx_accel_supports_bpp(res_w[sel_res_idx],
+                                            res_h[sel_res_idx],
+                                            bpp_vals[sel_bpp_idx])) {
+                    int preferred[4] = { 3, 1, 2, 0 };
+                    for (int p = 0; p < 4; p++) {
+                        int candidate = preferred[p];
+                        if (gfx_accel_supports_bpp(
+                                res_w[sel_res_idx], res_h[sel_res_idx],
+                                bpp_vals[candidate])) {
+                            sel_bpp_idx = candidate;
+                            break;
+                        }
                     }
                 }
             }

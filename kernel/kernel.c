@@ -181,8 +181,17 @@ void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh)
         unsigned char* d = (unsigned char*)lfb_ptr + offset;
         
         int dwords = line_bytes / 4;
-        for (int i = 0; i < dwords; i++) {
-            ((unsigned int*)d)[i] = ((const unsigned int*)s)[i];
+        if (dwords > 0) {
+            unsigned int src32 = (unsigned int)s;
+            unsigned int dst32 = (unsigned int)d;
+            asm volatile("cld; rep movsl"
+                         : "+S"(src32), "+D"(dst32), "+c"(dwords)
+                         :
+                         : "memory");
+            s = (const unsigned char*)src32;
+            d = (unsigned char*)dst32;
+            s -= dwords * 4;
+            d -= dwords * 4;
         }
         for (int i = dwords * 4; i < line_bytes; i++) {
             d[i] = s[i];
@@ -197,21 +206,31 @@ void copy_fullscreen_to_lfb(const unsigned char* s_buf)
     int bytes_per_line = screen_w * bytes_per_pixel;
     if (bytes_per_line == screen_pitch) {
         int dwords = (bytes_per_line * screen_h) / 4;
-        const unsigned int* s = (const unsigned int*)s_buf;
-        unsigned int* d = (unsigned int*)lfb_ptr;
-        for (int i = 0; i < dwords; i++) {
-            d[i] = s[i];
-        }
+        unsigned int src32 = (unsigned int)s_buf;
+        unsigned int dst32 = lfb_ptr;
+        asm volatile("cld; rep movsl"
+                     : "+S"(src32), "+D"(dst32), "+c"(dwords)
+                     :
+                     : "memory");
         for (int i = dwords * 4; i < bytes_per_line * screen_h; i++) {
-            ((unsigned char*)d)[i] = s_buf[i];
+            ((unsigned char*)lfb_ptr)[i] = s_buf[i];
         }
     } else {
         for (int y = 0; y < screen_h; y++) {
             const unsigned char* s = s_buf + y * screen_pitch;
             unsigned char* d = (unsigned char*)lfb_ptr + y * screen_pitch;
             int dwords = bytes_per_line / 4;
-            for (int i = 0; i < dwords; i++) {
-                ((unsigned int*)d)[i] = ((const unsigned int*)s)[i];
+            if (dwords > 0) {
+                unsigned int src32 = (unsigned int)s;
+                unsigned int dst32 = (unsigned int)d;
+                asm volatile("cld; rep movsl"
+                             : "+S"(src32), "+D"(dst32), "+c"(dwords)
+                             :
+                             : "memory");
+                s = (const unsigned char*)src32;
+                d = (unsigned char*)dst32;
+                s -= dwords * 4;
+                d -= dwords * 4;
             }
             for (int i = dwords * 4; i < bytes_per_line; i++) {
                 d[i] = s[i];
@@ -415,7 +434,8 @@ static void set_resolution_locked(int w, int h, int bpp)
             num_candidates = 3;
         } else if (w == 1280 && h == 1024) {
             candidates[0] = 0x14A; // VESA 1280x1024 32bpp
-            num_candidates = 1;
+            candidates[1] = 0x11D; // VESA 1280x1024 32bpp
+            num_candidates = 2;
         }
     } else if (bpp == 24) {
         int m = vbe_find_mode(w, h, 24);
@@ -429,6 +449,9 @@ static void set_resolution_locked(int w, int h, int bpp)
         } else if (w == 1024 && h == 768) {
             candidates[0] = 0x118; // 1024x768 24bpp
             num_candidates = 1;
+        } else if (w == 1280 && h == 1024) {
+            candidates[0] = 0x11C; // 1280x1024 24bpp
+            num_candidates = 1;
         }
     } else if (bpp <= 8) {
         if (w == 800 && h == 600) {
@@ -439,6 +462,9 @@ static void set_resolution_locked(int w, int h, int bpp)
             num_candidates = 1;
         } else if (w == 1024 && h == 768) {
             candidates[0] = 0x105; // 1024x768 8bpp
+            num_candidates = 1;
+        } else if (w == 1280 && h == 1024) {
+            candidates[0] = 0x107; // 1280x1024 8bpp
             num_candidates = 1;
         }
     } else { // 15 or 16 bpp
@@ -453,6 +479,10 @@ static void set_resolution_locked(int w, int h, int bpp)
         } else if (w == 1024 && h == 768) {
             candidates[0] = 0x117; // 1024x768 16bpp (64K colors)
             candidates[1] = 0x116; // 1024x768 15bpp (32K colors)
+            num_candidates = 2;
+        } else if (w == 1280 && h == 1024) {
+            candidates[0] = 0x11B; // 1280x1024 16bpp
+            candidates[1] = 0x11A; // 1280x1024 15bpp
             num_candidates = 2;
         }
     }
@@ -599,7 +629,6 @@ void kernel_main(void)
         
         if (!hardware_cursor && (mr || moved)) {
             if (last_mx >= 0) {
-                mouse_reset(v);
                 copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
             }
         }
@@ -618,19 +647,14 @@ void kernel_main(void)
         if (hardware_cursor) {
             if (need_full_copy) {
                 copy_fullscreen_to_lfb(v);
-                last_mx = mx; last_my = my;
             }
             gfx_accel_set_cursor(mx, my, 1);
-        } else if (need_full_copy) {
+        } else {
             extern void mouse_invalidate(void);
             mouse_invalidate();
-            mouse_draw(v);
-            copy_fullscreen_to_lfb(v);
-            last_mx = mx; last_my = my;
-        } else if (mr || moved) {
-            mouse_draw(v);
-            copy_rect_to_lfb(v, mx, my, 16, 16);
-            last_mx = mx; last_my = my;
+            if (need_full_copy) copy_fullscreen_to_lfb(v);
+            if (need_full_copy || mr || moved) mouse_draw_lfb_overlay();
         }
+        last_mx = mx; last_my = my;
     }
 }

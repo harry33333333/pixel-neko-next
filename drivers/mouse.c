@@ -2,6 +2,7 @@
 #include "port.h"
 #include "wm.h"
 #include "irq.h"
+#include "gfx_accel.h"
 
 static int mx = 160, my = 100;
 static int btn = 0;
@@ -11,6 +12,26 @@ static int init_done = 1;
 
 static unsigned int saved[16][16];
 static int saved_x = -1, saved_y = -1;
+extern unsigned char* lfb;
+
+static const char* cursor_shape[16] = {
+    "X               ",
+    "XX              ",
+    "X.X             ",
+    "X..X            ",
+    "X...X           ",
+    "X....X          ",
+    "X.....X         ",
+    "X......X        ",
+    "X.......X       ",
+    "X........X      ",
+    "X.........X     ",
+    "X......XXXX     ",
+    "X..X..X         ",
+    "X.X X..X        ",
+    "XX  X..X        ",
+    "     XX         "
+};
 
 int mouse_speed = 2;
 
@@ -152,25 +173,6 @@ void mouse_draw(unsigned char* vga)
     saved_x = x;
     saved_y = y;
 
-    static const char* cursor_shape[16] = {
-        "X               ",
-        "XX              ",
-        "X.X             ",
-        "X..X            ",
-        "X...X           ",
-        "X....X          ",
-        "X.....X         ",
-        "X......X        ",
-        "X.......X       ",
-        "X........X      ",
-        "X.........X     ",
-        "X......XXXX     ",
-        "X..X..X         ",
-        "X.X X..X        ",
-        "XX  X..X        ",
-        "     XX         "
-    };
-
     for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 16; j++) {
             if (cursor_shape[i][j] != ' ') {
@@ -181,6 +183,27 @@ void mouse_draw(unsigned char* vga)
             }
         }
     }
+}
+
+void mouse_draw_lfb_overlay(void)
+{
+    if (!lfb) return;
+    unsigned int flags = irq_save_flags();
+    int x = mx, y = my;
+    irq_restore_flags(flags);
+
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 16; j++) {
+            char pixel = cursor_shape[i][j];
+            if (pixel == ' ') continue;
+            int px = x + j;
+            int py = y + i;
+            if (px < screen_w && py < screen_h) {
+                PUT_PIXEL(lfb, px, py, pixel == 'X' ? 15 : 0);
+            }
+        }
+    }
+    gfx_accel_present_rect(x, y, 16, 16);
 }
 
 void mouse_reset(unsigned char* vga)

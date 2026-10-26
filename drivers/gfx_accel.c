@@ -275,11 +275,12 @@ int gfx_accel_supports_bpp(int w, int h, int bpp)
     if (w <= 0 || h <= 0 || vram_needed > max_vram) return 0;
 
     if (w == 1280 || h == 1024) {
-        if (w != 1280 || h != 1024 || bpp != 32 ||
+        if (w != 1280 || h != 1024 ||
+            (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) ||
             !gfx_accel_supports_1280x1024()) {
             return 0;
         }
-        return vbe_mode_available(1280, 1024, 32);
+        return vbe_mode_available(1280, 1024, bpp);
     }
 
     if (g_backend_kind == GFX_BACKEND_VMWARE) {
