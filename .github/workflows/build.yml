@@ -98,6 +98,7 @@ jobs:
           - Build 2012.167 queues mouse button edges for reliable double-click, batches cursor updates, and removes synchronous waits from SVGA dirty-rectangle presentation.
           - Build 2012.168 restores the smoother 2012.160 backbuffer cursor model while retaining queued click events and asynchronous SVGA presentation.
           - Build 2012.169 fully restores the 2012.160 mouse, double-click, cursor, framebuffer-copy, and SVGA presentation path while retaining unrelated later fixes.
+          - Build 2012.1695 normalizes hardware-documentation attribution for the CMI8738, CT4810 and ATI Mach64 drivers and restructures CT4810 register naming and SRC initialization.
         draft: false
         prerelease: false
         files: |

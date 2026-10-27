@@ -3,7 +3,7 @@
 
 // ----------------------------------------------------------------------------
 // ATI Mach64 / 3D Rage II+ Hardware Register Definitions
-// Ported from Linux Kernel atyfb (drivers/video/fbdev/aty/atyfb.h) & XFree86
+// Register layouts are based on the public ATI Mach64 Programmer's Guide.
 // ----------------------------------------------------------------------------
 
 #define ATI_VENDOR_ID               0x1002

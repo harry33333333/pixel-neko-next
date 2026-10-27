@@ -1,7 +1,9 @@
 /*
- * Portions of the hardware register access logic, timing sequences,
- * and AC'97/mixer quirks are inspired by the Linux ALSA driver implementations
- * (sound/pci/es1371.c and sound/pci/cmipci.c).
+ * C-Media CMI8738 / CMI8338 PCI audio driver.
+ *
+ * Register definitions and AC'97 mixer programming are based on the public
+ * C-Media CMI8738/C3DX technical documentation and the Intel AC'97
+ * Component Specification.
  */
 
 #include "cmi8738.h"
@@ -140,7 +142,7 @@ int cmi8738_init(void) {
 
     // 3. Reset Channel 0 and configure FUNCTRL0:
     // Bit 0 (CMI_CHADC0) = 0 -> PLAYBACK / DAC mode (Crucial! 1 = capture/record from ADC)
-    // Bit 1 (CMI_CHADC1) = 1 -> CAPTURE / ADC mode for Channel 1 (ALSA default)
+    // Bit 1 (CMI_CHADC1) = 1 -> CAPTURE / ADC mode for Channel 1
     // Bit 2 (CMI_PAUSE0) = 0 -> Unpaused
     // Bit 16 (CMI_CHEN0) = 0 -> DMA disabled initially
     unsigned int f0 = cmi_read32(CMI_REG_FUNCTRL0);
@@ -155,28 +157,28 @@ int cmi8738_init(void) {
     cmi_write32(CMI_REG_FUNCTRL0, f0);
 
     // 4. Configure MISC_CTRL:
-    // - Clear CM_PWD (bit 31 = 0: normal power)
-    // - Clear CM_RESET (bit 30 = 0: running)
-    // - Set CM_ENDBDAC (bit 23 = 1: dual-DAC routing required by ALSA)
-    // - Clear CM_XCHGDAC (bit 22 = 0: front output = CH0, green jack)
-    // - Set CM_TXVX (bit 27 = 1: PCI bus master burst timing)
-    // - Set CM_N4SPK3D (bit 26 = 1: Copy Front to Rear / 4-Speaker, so both green & rear jacks output)
+    // - Clear CMI_MISC_PWD (bit 31): leave the controller powered normally
+    // - Clear CMI_MISC_RESET (bit 30): leave the codec running
+    // - Set CMI_MISC_ENDBDAC (bit 23): enable dual-DAC playback routing
+    // - Clear CMI_MISC_XCHGDAC (bit 22): route CH0 to the front jack
+    // - Set CMI_MISC_TXVX (bit 27): use the required bus-master burst timing
+    // - Set CMI_MISC_N4SPK3D (bit 26): mirror front audio to the rear jack
     unsigned int misc = cmi_read32(CMI_REG_MISC_CTRL);
     misc &= ~(CMI_MISC_PWD | CMI_MISC_RESET | CMI_MISC_XCHGDAC);
     misc |= (CMI_MISC_ENDBDAC | CMI_MISC_N4SPK3D);
     if (g_cmi_device == CMI_DEV_8738) misc |= CMI_MISC_TXVX;
     cmi_write32(CMI_REG_MISC_CTRL, misc);
 
-    // 5. CMI8738-class parts require the ALSA cmipci extended-routing magic.
+    // 5. Apply the documented extended routing value for CMI8738-class parts.
     if (g_cmi_device == CMI_DEV_8338A || g_cmi_device == CMI_DEV_8338B) {
         cmi_write32(CMI_REG_EXT_MISC, 0);
     } else {
-        cmi_write32(CMI_REG_EXT_MISC, CMI_EXT_MISC_MAGIC);
+        cmi_write32(CMI_REG_EXT_MISC, CMI_EXT_MISC_ROUTING);
     }
 
-    // 6. Ensure CM_NXCHG = 0 in LEGACY_CTRL
+    // 6. Keep DAC channel exchange disabled in LEGACY_CTRL.
     unsigned int leg = cmi_read32(CMI_REG_LEGACY_CTRL);
-    leg &= ~0x80000000;
+    leg &= ~CMI_LEGACY_DAC_EXCHANGE;
     cmi_write32(CMI_REG_LEGACY_CTRL, leg);
 
     // 7. Configure FUNCTRL1:
@@ -188,11 +190,11 @@ int cmi8738_init(void) {
     f1 |= CMI_BREQ;                              // Bus Master Request
     cmi_write32(CMI_REG_FUNCTRL1, f1);
 
-    // 8. Format: 16-bit Stereo (CH0FMT = 11b in CHFORMAT) and CM_SETLAT48 (0x00800000)
+    // 8. Format: 16-bit stereo (CH0FMT = 11b) with SETLAT48 enabled.
     unsigned int fmt = cmi_read32(CMI_REG_CHFORMAT);
     fmt &= ~0x03;
     fmt |= 0x03;
-    fmt |= 0x00800000; // CM_SETLAT48
+    fmt |= CMI_CHFORMAT_SETLAT48;
     cmi_write32(CMI_REG_CHFORMAT, fmt);
 
     // 9. Native MIXER1 (0x24) and MIXER2 (0x25):
@@ -208,7 +210,7 @@ int cmi8738_init(void) {
 
     // 12. Unmute Speaker and Phone in extended mixer register 0xF0
     unsigned char ext = cmi_read_mixer(0xF0);
-    ext &= ~0x18; // Clear bit 3 (CM_VSPKM: Speaker mute) and bit 4 (CM_VPHOM: Phone mute)
+    ext &= ~(CMI_EXT_MIXER_SPEAKER_MUTE | CMI_EXT_MIXER_PHONE_MUTE);
     cmi_write_mixer(0xF0, ext);
 
     // 13. Set DMA Base Address and Frame Counts
@@ -265,7 +267,7 @@ void cmi8738_set_format(int rate, int bits, int stereo) {
     unsigned int fmt = cmi_read32(CMI_REG_CHFORMAT);
     fmt &= ~0x03;
     fmt |= chfmt;
-    fmt |= 0x00800000; // Preserve CM_SETLAT48
+    fmt |= CMI_CHFORMAT_SETLAT48;
     cmi_write32(CMI_REG_CHFORMAT, fmt);
 }
 
@@ -362,8 +364,9 @@ void cmi8738_set_volume(int master_vol, int pcm_vol) {
     m1 &= ~CMI_MIXER1_WSMUTE;
     outb(g_cmi_io_base + CMI_REG_MIXER1, m1);
 
-    // ALSA cmipci uses 5-bit stereo SB mixer volumes at 0x22/0x23 (master)
-    // and 0x04/0x05 (PCM). Other apparent "output" registers are not mutes.
+    // The SB-compatible mixer uses 5-bit stereo volume fields at 0x22/0x23
+    // for master and 0x04/0x05 for PCM. The other output registers are
+    // switches rather than volume or mute controls.
     unsigned char m5 = (unsigned char)((master_vol * 31) / 100);
     unsigned char p5 = (unsigned char)((pcm_vol * 31) / 100);
 
@@ -375,17 +378,17 @@ void cmi8738_set_volume(int master_vol, int pcm_vol) {
     // Output switch (0x3C): enable all analog mixer outputs.
     cmi_write_mixer(0x3C, 0x1F);
 
-    // Speaker and Phone mute control (0xF0): clear bit 3 (CM_VSPKM) and bit 4 (CM_VPHOM)
+    // Clear the speaker and phone mute switches in extended mixer 0xF0.
     unsigned char ext = cmi_read_mixer(0xF0);
-    ext &= ~0x18;
+    ext &= ~(CMI_EXT_MIXER_SPEAKER_MUTE | CMI_EXT_MIXER_PHONE_MUTE);
     cmi_write_mixer(0xF0, ext);
 }
 
 unsigned int cmi8738_get_dma_frame_pos(void) {
     if (!g_cmi_present || !g_cmi_io_base || !g_dma_running) return 0;
 
-    // Reading Low 16 bits of CH0_FRAME2 returns remaining sample frames (16383 down to 0)
-    // Retry up to 3 times to get a stable, valid reading (ALSA cmipci workaround)
+    // Reading the low 16 bits of CH0_FRAME2 returns the remaining sample
+    // frames. Retry briefly because the counter can be sampled mid-update.
     unsigned short rem = 0;
     for (int tries = 0; tries < 3; tries++) {
         rem = cmi_read16(CMI_REG_CH0_FRAME2);

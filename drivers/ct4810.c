@@ -1,7 +1,9 @@
 /*
- * Portions of the hardware register access logic, timing sequences,
- * and AC'97/mixer quirks are inspired by the Linux ALSA driver implementations
- * (sound/pci/es1371.c and sound/pci/cmipci.c).
+ * Ensoniq ES1371 / Creative CT4810 / CT5880 PCI audio driver.
+ *
+ * Register definitions, sample-rate converter sequencing, and AC'97 access
+ * follow the public Ensoniq ES1371 hardware documentation, Creative CT5880
+ * documentation, and the Intel AC'97 Component Specification.
  */
 
 #include "ct4810.h"
@@ -12,9 +14,9 @@
 #include "pci.h"
 
 #define CT_SRC_STATE_MASK \
-    (ES_1371_SRC_DISABLE | ES_1371_DIS_P1 | ES_1371_DIS_P2 | ES_1371_DIS_R1)
-#define CT_CODEC_SYNC_STATE 0x00010000U
-#define CT_CODEC_STATE_MASK 0x00870000U
+    (CT_SRC_DISABLE | CT_SRC_DAC1_DISABLE | CT_SRC_DAC2_DISABLE | CT_SRC_ADC_DISABLE)
+#define CT_SRC_CODEC_ACCESS_STATE 0x00010000U
+#define CT_SRC_CODEC_STATE_MASK   0x00870000U
 #define CT_WAIT_LOOPS       0x8000
 
 static int g_ct_present = 0;
@@ -80,107 +82,110 @@ static void ct_set_codec_name(unsigned short id1, unsigned short id2) {
     }
 }
 
-// Wait until the ES1371 sample-rate converter RAM accepts a command.
-static unsigned int ct_wait_src_ready(void) {
+// Wait until the sample-rate converter RAM accepts another command.
+static unsigned int ct_src_wait_idle(void) {
     unsigned int r = 0;
     if (!g_ct_io_base) return 0;
     for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-        r = ct_read32(ES_REG_SRC);
-        if (!(r & ES_1371_SRC_RAM_BUSY)) return r;
+        r = ct_read32(CT_REG_SRC_CONTROL);
+        if (!(r & CT_SRC_RAM_BUSY)) return r;
         ct_io_delay();
     }
     return 0;
 }
 
-// ALSA exposes the SRC state before reading its RAM. The chip needs the
-// intermediate 0x10000 state and a second access to return valid data.
-static unsigned short ct_src_read(unsigned short reg) {
-    unsigned int temp;
-    unsigned int orig;
-    unsigned int r;
+// The controller returns RAM data only after the intermediate codec-access
+// state and a second register access have been observed.
+static unsigned short ct_src_read_word(unsigned short reg) {
+    unsigned int saved_state;
+    unsigned int sampled_state;
+    unsigned int control;
 
     if (!g_ct_io_base) return 0;
 
-    temp = orig = ct_wait_src_ready();
-    r = (temp & CT_SRC_STATE_MASK) | ES_1371_SRC_RAM_ADDRO(reg) |
-        CT_CODEC_SYNC_STATE;
-    ct_write32(ES_REG_SRC, r);
+    saved_state = ct_src_wait_idle();
+    control = (saved_state & CT_SRC_STATE_MASK) |
+              CT_SRC_RAM_ADDRESS(reg) | CT_SRC_CODEC_ACCESS_STATE;
+    ct_write32(CT_REG_SRC_CONTROL, control);
 
-    temp = ct_wait_src_ready();
-    if ((temp & CT_CODEC_STATE_MASK) != CT_CODEC_SYNC_STATE) {
+    sampled_state = ct_src_wait_idle();
+    if ((sampled_state & CT_SRC_CODEC_STATE_MASK) !=
+        CT_SRC_CODEC_ACCESS_STATE) {
         for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-            temp = ct_read32(ES_REG_SRC);
-            if ((temp & CT_CODEC_STATE_MASK) == CT_CODEC_SYNC_STATE) break;
+            sampled_state = ct_read32(CT_REG_SRC_CONTROL);
+            if ((sampled_state & CT_SRC_CODEC_STATE_MASK) ==
+                CT_SRC_CODEC_ACCESS_STATE) break;
             ct_io_delay();
         }
     }
 
-    r = (orig & CT_SRC_STATE_MASK) | ES_1371_SRC_RAM_ADDRO(reg);
-    ct_write32(ES_REG_SRC, r);
-    return (unsigned short)(temp & 0xFFFF);
+    control = (saved_state & CT_SRC_STATE_MASK) | CT_SRC_RAM_ADDRESS(reg);
+    ct_write32(CT_REG_SRC_CONTROL, control);
+    return (unsigned short)(sampled_state & 0xFFFF);
 }
 
-static void ct_src_write(unsigned short reg, unsigned short data) {
-    unsigned int r = ct_wait_src_ready() & CT_SRC_STATE_MASK;
-    r |= ES_1371_SRC_RAM_ADDRO(reg) | (unsigned int)data;
-    ct_write32(ES_REG_SRC, r | ES_1371_SRC_RAM_WE);
+static void ct_src_write_word(unsigned short reg, unsigned short data) {
+    unsigned int r = ct_src_wait_idle() & CT_SRC_STATE_MASK;
+    r |= CT_SRC_RAM_ADDRESS(reg) | (unsigned int)data;
+    ct_write32(CT_REG_SRC_CONTROL, r | CT_SRC_RAM_WRITE_ENABLE);
 }
 
-static unsigned int ct_enter_codec_window(void) {
-    unsigned int saved = ct_wait_src_ready();
-    ct_write32(ES_REG_SRC, (saved & CT_SRC_STATE_MASK) | CT_CODEC_SYNC_STATE);
+static unsigned int ct_codec_access_begin(void) {
+    unsigned int saved = ct_src_wait_idle();
+    ct_write32(CT_REG_SRC_CONTROL,
+               (saved & CT_SRC_STATE_MASK) | CT_SRC_CODEC_ACCESS_STATE);
 
     for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-        if ((ct_read32(ES_REG_SRC) & CT_CODEC_STATE_MASK) == 0) break;
+        if ((ct_read32(CT_REG_SRC_CONTROL) & CT_SRC_CODEC_STATE_MASK) == 0) break;
         ct_io_delay();
     }
     for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-        if ((ct_read32(ES_REG_SRC) & CT_CODEC_STATE_MASK) ==
-            CT_CODEC_SYNC_STATE) break;
+        if ((ct_read32(CT_REG_SRC_CONTROL) & CT_SRC_CODEC_STATE_MASK) ==
+            CT_SRC_CODEC_ACCESS_STATE) break;
         ct_io_delay();
     }
     return saved;
 }
 
-static void ct_leave_codec_window(unsigned int saved) {
-    ct_wait_src_ready();
-    ct_write32(ES_REG_SRC, saved);
+static void ct_codec_access_end(unsigned int saved) {
+    ct_src_wait_idle();
+    ct_write32(CT_REG_SRC_CONTROL, saved);
 }
 
-static void ct_codec_write(unsigned char reg, unsigned short val) {
+static void ct_ac97_write(unsigned char reg, unsigned short val) {
     unsigned int command;
     unsigned int saved;
 
     if (!g_ct_io_base) return;
     command = ((unsigned int)(reg & 0x7F) << 16) | val;
-    if (g_ct_is_ev1938) command |= EV_1938_CODEC_MAGIC;
+    if (g_ct_is_ev1938) command |= CT_EV1938_CODEC_ACCESS;
 
     for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-        if (!(ct_read32(ES_REG_CODEC) & ES_1371_CODEC_WIP)) {
-            saved = ct_enter_codec_window();
-            ct_write32(ES_REG_CODEC, command);
-            ct_leave_codec_window(saved);
+        if (!(ct_read32(CT_REG_CODEC_PORT) & CT_CODEC_WRITE_BUSY)) {
+            saved = ct_codec_access_begin();
+            ct_write32(CT_REG_CODEC_PORT, command);
+            ct_codec_access_end(saved);
             return;
         }
         ct_io_delay();
     }
 }
 
-static unsigned short ct_codec_read(unsigned char reg) {
+static unsigned short ct_ac97_read(unsigned char reg) {
     unsigned int command;
     unsigned int saved;
 
     if (!g_ct_io_base) return 0;
-    command = ((unsigned int)(reg & 0x7F) << 16) | ES_1371_CODEC_READ;
-    if (g_ct_is_ev1938) command |= EV_1938_CODEC_MAGIC;
+    command = ((unsigned int)(reg & 0x7F) << 16) | CT_CODEC_READ_REQUEST;
+    if (g_ct_is_ev1938) command |= CT_EV1938_CODEC_ACCESS;
 
     for (int retry = 0; retry < 10; retry++) {
         int started = 0;
         for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-            if (!(ct_read32(ES_REG_CODEC) & ES_1371_CODEC_WIP)) {
-                saved = ct_enter_codec_window();
-                ct_write32(ES_REG_CODEC, command);
-                ct_leave_codec_window(saved);
+            if (!(ct_read32(CT_REG_CODEC_PORT) & CT_CODEC_WRITE_BUSY)) {
+                saved = ct_codec_access_begin();
+                ct_write32(CT_REG_CODEC_PORT, command);
+                ct_codec_access_end(saved);
                 started = 1;
                 break;
             }
@@ -189,14 +194,14 @@ static unsigned short ct_codec_read(unsigned char reg) {
         if (!started) continue;
 
         for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-            if (!(ct_read32(ES_REG_CODEC) & ES_1371_CODEC_WIP)) break;
+            if (!(ct_read32(CT_REG_CODEC_PORT) & CT_CODEC_WRITE_BUSY)) break;
             ct_io_delay();
         }
         for (int t = 0; t < CT_WAIT_LOOPS; t++) {
-            unsigned int value = ct_read32(ES_REG_CODEC);
-            if (value & ES_1371_CODEC_RDY) {
+            unsigned int value = ct_read32(CT_REG_CODEC_PORT);
+            if (value & CT_CODEC_READY) {
                 if (g_ct_is_ev1938) {
-                    for (int d = 0; d < 100; d++) (void)ct_read32(ES_REG_CONTROL);
+                    for (int d = 0; d < 100; d++) (void)ct_read32(CT_REG_CONTROL);
                 }
                 return (unsigned short)(value & 0xFFFF);
             }
@@ -206,53 +211,81 @@ static unsigned short ct_codec_read(unsigned char reg) {
     return 0;
 }
 
-static void ct_program_src_rate(unsigned short base, int rate) {
-    unsigned int freeze;
+static unsigned int ct_src_channel_disable_bit(unsigned short base) {
+    if (base == CT_SRC_DAC2_BASE) return CT_SRC_DAC2_DISABLE;
+    if (base == CT_SRC_DAC1_BASE) return CT_SRC_DAC1_DISABLE;
+    return CT_SRC_ADC_DISABLE;
+}
+
+static void ct_src_set_rate(unsigned short base, int rate) {
+    unsigned int disable;
     unsigned int r;
     unsigned int freq;
-    unsigned short int_regs;
+    unsigned short integer_field;
 
     if (rate < 3000) rate = 3000;
     if (rate > 48000) rate = 48000;
     freq = (((unsigned int)rate << 15) + 1500U) / 3000U;
 
-    if (base == ES_SMPREG_DAC2) {
-        freeze = ES_1371_DIS_P2;
-    } else if (base == ES_SMPREG_DAC1) {
-        freeze = ES_1371_DIS_P1;
-    } else {
-        freeze = ES_1371_DIS_R1;
+    disable = ct_src_channel_disable_bit(base);
+    r = (ct_src_wait_idle() & CT_SRC_STATE_MASK) | disable;
+    ct_write32(CT_REG_SRC_CONTROL, r);
+
+    integer_field = ct_src_read_word(base + CT_SRC_INTEGER_FREQUENCY);
+    ct_src_write_word(base + CT_SRC_INTEGER_FREQUENCY,
+                      (unsigned short)((integer_field & 0x00FF) |
+                                      ((freq >> 5) & 0xFC00)));
+    ct_src_write_word(base + CT_SRC_FRACTIONAL_FREQUENCY, (unsigned short)(freq & 0x7FFF));
+
+    r = ct_src_wait_idle() & CT_SRC_STATE_MASK & ~disable;
+    ct_write32(CT_REG_SRC_CONTROL, r);
+}
+
+typedef struct {
+    unsigned short address;
+    unsigned short value;
+} ct_src_default_t;
+
+static void ct_src_load_channel_defaults(void) {
+    static const ct_src_default_t defaults[] = {
+        { CT_SRC_DAC1_BASE + CT_SRC_TRUNCATION,            (unsigned short)(16U << 4) },
+        { CT_SRC_DAC1_BASE + CT_SRC_INTEGER_FREQUENCY,     (unsigned short)(16U << 10) },
+        { CT_SRC_DAC2_BASE + CT_SRC_TRUNCATION,            (unsigned short)(16U << 4) },
+        { CT_SRC_DAC2_BASE + CT_SRC_INTEGER_FREQUENCY,     (unsigned short)(16U << 10) },
+        { CT_SRC_ADC_BASE + CT_SRC_TRUNCATION,             (unsigned short)(16U << 4) },
+        { CT_SRC_ADC_BASE + CT_SRC_INTEGER_FREQUENCY,      (unsigned short)(16U << 10) },
+        { CT_SRC_ADC_VOLUME_BASE,                          (unsigned short)(1U << 12) },
+        { CT_SRC_ADC_VOLUME_BASE + 1,                      (unsigned short)(1U << 12) },
+        { CT_SRC_DAC1_VOLUME_BASE,                         (unsigned short)(1U << 12) },
+        { CT_SRC_DAC1_VOLUME_BASE + 1,                     (unsigned short)(1U << 12) },
+        { CT_SRC_DAC2_VOLUME_BASE,                         (unsigned short)(1U << 12) },
+        { CT_SRC_DAC2_VOLUME_BASE + 1,                     (unsigned short)(1U << 12) }
+    };
+
+    unsigned int count = sizeof(defaults) / sizeof(defaults[0]);
+    for (unsigned int i = 0; i < count; i++) {
+        ct_src_write_word(defaults[i].address, defaults[i].value);
     }
-    r = (ct_wait_src_ready() & CT_SRC_STATE_MASK) | freeze;
-    ct_write32(ES_REG_SRC, r);
-
-    int_regs = ct_src_read(base + ES_SMPREG_INT_REGS);
-    ct_src_write(base + ES_SMPREG_INT_REGS,
-                 (unsigned short)((int_regs & 0x00FF) | ((freq >> 5) & 0xFC00)));
-    ct_src_write(base + ES_SMPREG_VFREQ_FRAC, (unsigned short)(freq & 0x7FFF));
-
-    r = ct_wait_src_ready() & CT_SRC_STATE_MASK & ~freeze;
-    ct_write32(ES_REG_SRC, r);
 }
 
 static int ct_device_supported(unsigned short vendor, unsigned short device) {
-    if (vendor == ENSONIQ_VENDOR_ID) {
-        return device == ES1371_DEV_ID ||
-               device == ES1371_COMPAT_DEV_ID ||
-               device == CT5880_DEV_ID;
+    if (vendor == CT_VENDOR_ENSONIQ) {
+        return device == CT_DEV_ES1371 ||
+               device == CT_DEV_ES1371_COMPAT ||
+               device == CT_DEV_CT5880;
     }
-    return vendor == CREATIVE_VENDOR_ID &&
-           (device == CT5880_DEV_ID || device == EV1938_DEV_ID);
+    return vendor == CT_VENDOR_CREATIVE &&
+           (device == CT_DEV_CT5880 || device == CT_DEV_EV1938);
 }
 
 static int ct_needs_ac97_reset_quirk(unsigned short vendor,
                                      unsigned short device,
                                      unsigned char revision) {
     (void)vendor;
-    if (device == CT5880_DEV_ID) {
+    if (device == CT_DEV_CT5880) {
         return revision == 0x02 || revision == 0x03 || revision == 0x04;
     }
-    if (device == ES1371_DEV_ID || device == ES1371_COMPAT_DEV_ID) {
+    if (device == CT_DEV_ES1371 || device == CT_DEV_ES1371_COMPAT) {
         return revision == 0x07 || revision == 0x08;
     }
     return 0;
@@ -299,13 +332,13 @@ int ct4810_init(void) {
         }
 
         g_ct_revision = pci->revision;
-        g_ct_is_ev1938 = (device == EV1938_DEV_ID);
+        g_ct_is_ev1938 = (device == CT_DEV_EV1938);
 
-        if (device == CT5880_DEV_ID) {
+        if (device == CT_DEV_CT5880) {
             g_ct_chip_name = "Creative CT4810 (CT5880) PCI";
         } else if (g_ct_is_ev1938) {
             g_ct_chip_name = "Creative AudioPCI (EV1938) PCI";
-        } else if (device == ES1371_COMPAT_DEV_ID) {
+        } else if (device == CT_DEV_ES1371_COMPAT) {
             g_ct_chip_name = "Ensoniq AudioPCI (CT4810 compatible) PCI";
         } else {
             g_ct_chip_name = "Ensoniq AudioPCI (ES1371) PCI";
@@ -331,71 +364,60 @@ int ct4810_init(void) {
     g_ct_half_filled[1] = 0;
 
     // Keep the controller quiet while the codec and SRC are reset.
-    ct_write32(ES_REG_CONTROL, 0);
-    ct_write32(ES_REG_SERIAL, 0);
-    ct_write32(ES_REG_LEGACY, 0);
+    ct_write32(CT_REG_CONTROL, 0);
+    ct_write32(CT_REG_SERIAL_CONTROL, 0);
+    ct_write32(CT_REG_LEGACY_CONTROL, 0);
 
     // Several CT5880/ES1373 revisions need the extra AC'97 reset pulse.
     if (ct_needs_ac97_reset_quirk(vendor, device, g_ct_revision)) {
-        status |= ES_STAT_AC97_RST;
+        status |= CT_STATUS_AC97_RESET;
     }
     if (status) {
-        ct_write32(ES_REG_STATUS, status);
+        ct_write32(CT_REG_STATUS, status);
         sleep_ms(20);
     }
 
     // Warm-reset the AC'97 link so the codec starts its bit clock.
-    ct_write32(ES_REG_CONTROL, ES_CTL_SYNC_RES);
-    (void)ct_read32(ES_REG_CONTROL);
+    ct_write32(CT_REG_CONTROL, CT_CONTROL_AC97_SYNC_RESET);
+    (void)ct_read32(CT_REG_CONTROL);
     sleep_ms(2);
-    ct_write32(ES_REG_CONTROL, 0);
+    ct_write32(CT_REG_CONTROL, 0);
 
-    // Program all SRC parameters before enabling the converter. ALSA warns
-    // that enabling an unconfigured SRC can leave the RAM busy forever.
-    (void)ct_wait_src_ready();
-    ct_write32(ES_REG_SRC, ES_1371_SRC_DISABLE);
-    for (int i = 0; i < 0x80; i++) ct_src_write((unsigned short)i, 0);
+    // Hold the converter disabled until all RAM-backed parameters are loaded;
+    // enabling it early can leave the converter busy indefinitely.
+    (void)ct_src_wait_idle();
+    ct_write32(CT_REG_SRC_CONTROL, CT_SRC_DISABLE);
+    for (int i = 0; i < 0x80; i++) ct_src_write_word((unsigned short)i, 0);
 
-    ct_src_write(ES_SMPREG_DAC1 + ES_SMPREG_TRUNC_N, 16 << 4);
-    ct_src_write(ES_SMPREG_DAC1 + ES_SMPREG_INT_REGS, 16 << 10);
-    ct_src_write(ES_SMPREG_DAC2 + ES_SMPREG_TRUNC_N, 16 << 4);
-    ct_src_write(ES_SMPREG_DAC2 + ES_SMPREG_INT_REGS, 16 << 10);
-    ct_src_write(ES_SMPREG_ADC + ES_SMPREG_TRUNC_N, 16 << 4);
-    ct_src_write(ES_SMPREG_ADC + ES_SMPREG_INT_REGS, 16 << 10);
-    ct_src_write(ES_SMPREG_VOL_ADC, 1 << 12);
-    ct_src_write(ES_SMPREG_VOL_ADC + 1, 1 << 12);
-    ct_src_write(ES_SMPREG_VOL_DAC1, 1 << 12);
-    ct_src_write(ES_SMPREG_VOL_DAC1 + 1, 1 << 12);
-    ct_src_write(ES_SMPREG_VOL_DAC2, 1 << 12);
-    ct_src_write(ES_SMPREG_VOL_DAC2 + 1, 1 << 12);
+    ct_src_load_channel_defaults();
 
-    ct_program_src_rate(ES_SMPREG_DAC1, 44100);
-    ct_program_src_rate(ES_SMPREG_DAC2, 44100);
-    ct_program_src_rate(ES_SMPREG_ADC, 44100);
-    (void)ct_wait_src_ready();
-    ct_write32(ES_REG_SRC, 0);
+    ct_src_set_rate(CT_SRC_DAC1_BASE, 44100);
+    ct_src_set_rate(CT_SRC_DAC2_BASE, 44100);
+    ct_src_set_rate(CT_SRC_ADC_BASE, 44100);
+    (void)ct_src_wait_idle();
+    ct_write32(CT_REG_SRC_CONTROL, 0);
 
     // Cold-reset the codec, then allow slower AK4540/TR28023 parts to wake.
-    ct_codec_write(AC97_RESET, 0x0000);
+    ct_ac97_write(CT_AC97_RESET, 0x0000);
     sleep_ms(50);
-    unsigned short id1 = ct_codec_read(AC97_VENDOR_ID1);
-    unsigned short id2 = ct_codec_read(AC97_VENDOR_ID2);
+    unsigned short id1 = ct_ac97_read(CT_AC97_VENDOR_ID1);
+    unsigned short id2 = ct_ac97_read(CT_AC97_VENDOR_ID2);
     if (id1 || id2) ct_set_codec_name(id1, id2);
 
-    ct_codec_write(AC97_MASTER_VOLUME, 0x0000);
-    ct_codec_write(AC97_HEADPHONE_VOLUME, 0x0000);
-    ct_codec_write(AC97_PCM_OUT_VOLUME, 0x0000);
-    ct_codec_write(0x0A, 0x8000); // Mute PC beep
-    ct_codec_write(0x0E, 0x8008); // Mute microphone
-    ct_codec_write(0x10, 0x8808); // Mute line input
-    ct_codec_write(0x12, 0x8808); // Mute CD input
+    ct_ac97_write(CT_AC97_MASTER_VOLUME, 0x0000);
+    ct_ac97_write(CT_AC97_HEADPHONE_VOLUME, 0x0000);
+    ct_ac97_write(CT_AC97_PCM_OUT_VOLUME, 0x0000);
+    ct_ac97_write(0x0A, 0x8000); // Mute PC beep
+    ct_ac97_write(0x0E, 0x8008); // Mute microphone
+    ct_ac97_write(0x10, 0x8808); // Mute line input
+    ct_ac97_write(0x12, 0x8808); // Mute CD input
 
     ct4810_set_format(44100, 16, 1);
 
-    ct_write32(ES_REG_MEMPAGE, ES_PAGE_DAC);
-    ct_write32(ES_REG_DAC2_FRAME, g_ct_dma_phys);
-    ct_write32(ES_REG_DAC2_SIZE, (CT_DMA_BUFFER_BYTES / 4) - 1);
-    ct_write32(ES_REG_DAC2_COUNT, (CT_DMA_HALF_BYTES / 4) - 1);
+    ct_write32(CT_REG_MEMORY_PAGE, CT_PAGE_DAC);
+    ct_write32(CT_REG_DAC2_FRAME, g_ct_dma_phys);
+    ct_write32(CT_REG_DAC2_SIZE, (CT_DMA_BUFFER_BYTES / 4) - 1);
+    ct_write32(CT_REG_DAC2_COUNT, (CT_DMA_HALF_BYTES / 4) - 1);
 
     return 0;
 }
@@ -419,32 +441,32 @@ void ct4810_set_format(int rate, int bits, int stereo) {
     if (bits == 16) mode |= 0x02;
     if (stereo) mode |= 0x01;
 
-    unsigned int sctrl = ct_read32(ES_REG_SERIAL);
-    sctrl &= ~(ES_P2_LOOP_SEL | ES_P2_PAUSE | ES_P2_DAC_SEN |
-               ES_P2_END_INCM | ES_P2_ST_INCM | ES_P2_MODEM);
-    sctrl |= ES_P2_INT_EN | ES_P2_MODEO(mode) |
-             ES_P2_END_INCO(mode & 0x02 ? 2 : 1) | ES_P2_ST_INCO(0);
-    ct_write32(ES_REG_SERIAL, sctrl);
+    unsigned int sctrl = ct_read32(CT_REG_SERIAL_CONTROL);
+    sctrl &= ~(CT_SERIAL_P2_LOOPBACK | CT_SERIAL_P2_PAUSE | CT_SERIAL_P2_DAC_SLOT_ENABLE |
+               CT_SERIAL_P2_END_MASK | CT_SERIAL_P2_START_MASK | CT_SERIAL_P2_MODE_MASK);
+    sctrl |= CT_SERIAL_P2_INTERRUPT | CT_SERIAL_P2_MODE(mode) |
+             CT_SERIAL_P2_END_INC(mode & 0x02 ? 2 : 1) | CT_SERIAL_P2_START_INC(0);
+    ct_write32(CT_REG_SERIAL_CONTROL, sctrl);
 
-    ct_program_src_rate(ES_SMPREG_DAC2, rate);
+    ct_src_set_rate(CT_SRC_DAC2_BASE, rate);
 }
 
 void ct4810_start_dma(void) {
     if (!g_ct_present || !g_ct_io_base || !g_ct_dma_buf) return;
 
-    ct_write32(ES_REG_MEMPAGE, ES_PAGE_DAC);
-    ct_write32(ES_REG_DAC2_FRAME, g_ct_dma_phys);
-    ct_write32(ES_REG_DAC2_SIZE, (CT_DMA_BUFFER_BYTES / 4) - 1);
-    ct_write32(ES_REG_DAC2_COUNT, (CT_DMA_HALF_BYTES / 4) - 1);
+    ct_write32(CT_REG_MEMORY_PAGE, CT_PAGE_DAC);
+    ct_write32(CT_REG_DAC2_FRAME, g_ct_dma_phys);
+    ct_write32(CT_REG_DAC2_SIZE, (CT_DMA_BUFFER_BYTES / 4) - 1);
+    ct_write32(CT_REG_DAC2_COUNT, (CT_DMA_HALF_BYTES / 4) - 1);
 
-    unsigned int sctrl = ct_read32(ES_REG_SERIAL);
-    sctrl &= ~(ES_P2_LOOP_SEL | ES_P2_PAUSE);
-    ct_write32(ES_REG_SERIAL, sctrl);
+    unsigned int sctrl = ct_read32(CT_REG_SERIAL_CONTROL);
+    sctrl &= ~(CT_SERIAL_P2_LOOPBACK | CT_SERIAL_P2_PAUSE);
+    ct_write32(CT_REG_SERIAL_CONTROL, sctrl);
 
-    unsigned int control = ct_read32(ES_REG_CONTROL);
-    control &= ~ES_CTL_BYPASS_P2;
-    control |= ES_CTL_BREQ | ES_CTL_DAC2_EN;
-    ct_write32(ES_REG_CONTROL, control);
+    unsigned int control = ct_read32(CT_REG_CONTROL);
+    control &= ~CT_CONTROL_P2_BYPASS;
+    control |= CT_CONTROL_BUS_MASTER_REQ | CT_CONTROL_DAC2_ENABLE;
+    ct_write32(CT_REG_CONTROL, control);
 
     g_ct_dma_running = 1;
     g_ct_last_half_playing = 0;
@@ -456,12 +478,12 @@ void ct4810_start_dma(void) {
 void ct4810_stop_dma(void) {
     if (!g_ct_present || !g_ct_io_base) return;
 
-    unsigned int control = ct_read32(ES_REG_CONTROL);
-    control &= ~(ES_CTL_BREQ | ES_CTL_DAC2_EN);
-    ct_write32(ES_REG_CONTROL, control);
+    unsigned int control = ct_read32(CT_REG_CONTROL);
+    control &= ~(CT_CONTROL_BUS_MASTER_REQ | CT_CONTROL_DAC2_ENABLE);
+    ct_write32(CT_REG_CONTROL, control);
 
-    unsigned int sctrl = ct_read32(ES_REG_SERIAL);
-    ct_write32(ES_REG_SERIAL, sctrl | ES_P2_PAUSE);
+    unsigned int sctrl = ct_read32(CT_REG_SERIAL_CONTROL);
+    ct_write32(CT_REG_SERIAL_CONTROL, sctrl | CT_SERIAL_P2_PAUSE);
 
     g_ct_dma_running = 0;
     g_ct_last_half_playing = -1;
@@ -478,10 +500,10 @@ void ct4810_stop_dma(void) {
 
 void ct4810_pause_dma(int pause) {
     if (!g_ct_present || !g_ct_io_base) return;
-    unsigned int sctrl = ct_read32(ES_REG_SERIAL);
-    if (pause) sctrl |= ES_P2_PAUSE;
-    else sctrl &= ~ES_P2_PAUSE;
-    ct_write32(ES_REG_SERIAL, sctrl);
+    unsigned int sctrl = ct_read32(CT_REG_SERIAL_CONTROL);
+    if (pause) sctrl |= CT_SERIAL_P2_PAUSE;
+    else sctrl &= ~CT_SERIAL_P2_PAUSE;
+    ct_write32(CT_REG_SERIAL_CONTROL, sctrl);
 }
 
 void ct4810_set_volume(int master_vol, int pcm_vol) {
@@ -499,16 +521,16 @@ void ct4810_set_volume(int master_vol, int pcm_vol) {
     unsigned short p_val =
         (pcm_vol == 0) ? 0x8000 : (unsigned short)((p_att << 8) | p_att);
 
-    ct_codec_write(AC97_MASTER_VOLUME, m_val);
-    ct_codec_write(AC97_HEADPHONE_VOLUME, m_val);
-    ct_codec_write(AC97_PCM_OUT_VOLUME, p_val);
+    ct_ac97_write(CT_AC97_MASTER_VOLUME, m_val);
+    ct_ac97_write(CT_AC97_HEADPHONE_VOLUME, m_val);
+    ct_ac97_write(CT_AC97_PCM_OUT_VOLUME, p_val);
 }
 
 unsigned int ct4810_get_dma_frame_pos(void) {
     if (!g_ct_present || !g_ct_io_base || !g_ct_dma_running) return 0;
 
-    ct_write32(ES_REG_MEMPAGE, ES_PAGE_DAC);
-    unsigned int val = ct_read32(ES_REG_DAC2_SIZE);
+    ct_write32(CT_REG_MEMORY_PAGE, CT_PAGE_DAC);
+    unsigned int val = ct_read32(CT_REG_DAC2_SIZE);
     unsigned int frame = (val >> 16) & 0xFFFF;
     if (frame >= CT_DMA_TOTAL_FRAMES) frame = 0;
     return frame;

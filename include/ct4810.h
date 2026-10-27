@@ -1,84 +1,84 @@
 #ifndef CT4810_H
 #define CT4810_H
 
-// Creative CT4810 / CT5880 / Ensoniq ES1371 / ES1373 PCI Audio Driver
+// Creative CT4810 / CT5880 / Ensoniq ES1371 / ES1373 PCI audio driver.
 
-#define ENSONIQ_VENDOR_ID       0x1274
-#define ES1371_DEV_ID           0x1371
-#define ES1371_COMPAT_DEV_ID    0x0371
-#define CT5880_DEV_ID           0x5880
-#define CREATIVE_VENDOR_ID      0x1102
-#define EV1938_DEV_ID           0x8938
+#define CT_VENDOR_ENSONIQ       0x1274
+#define CT_DEV_ES1371           0x1371
+#define CT_DEV_ES1371_COMPAT    0x0371
+#define CT_DEV_CT5880           0x5880
+#define CT_VENDOR_CREATIVE      0x1102
+#define CT_DEV_EV1938           0x8938
 
-// ES1371 / CT5880 direct I/O registers (BAR0 offsets).
-#define ES_REG_CONTROL          0x00
-#define ES_REG_STATUS           0x04
-#define ES_REG_MEMPAGE          0x0C
-#define ES_REG_SRC              0x10
-#define ES_REG_CODEC            0x14
-#define ES_REG_LEGACY           0x18
-#define ES_REG_SERIAL           0x20
-#define ES_REG_DAC2_COUNT       0x28
+// Controller direct I/O registers (BAR0 offsets).
+#define CT_REG_CONTROL          0x00
+#define CT_REG_STATUS           0x04
+#define CT_REG_MEMORY_PAGE      0x0C
+#define CT_REG_SRC_CONTROL      0x10
+#define CT_REG_CODEC_PORT       0x14
+#define CT_REG_LEGACY_CONTROL   0x18
+#define CT_REG_SERIAL_CONTROL   0x20
+#define CT_REG_DAC2_COUNT       0x28
 
-// DAC page registers.
-#define ES_PAGE_DAC             0x0C
-#define ES_REG_DAC2_FRAME       0x38
-#define ES_REG_DAC2_SIZE        0x3C
+// Memory-page selector and DAC page registers.
+#define CT_PAGE_DAC             0x0C
+#define CT_REG_DAC2_FRAME       0x38
+#define CT_REG_DAC2_SIZE        0x3C
 
 // Control register bits.
-#define ES_CTL_BYPASS_P2        (1U << 30) // ES1373-only SRC bypass
-#define ES_CTL_SYNC_RES         (1U << 14) // AC'97 warm reset
-#define ES_CTL_BREQ             (1U << 7)  // PCI bus-master request
-#define ES_CTL_DAC1_EN          (1U << 6)
-#define ES_CTL_DAC2_EN          (1U << 5)
-#define ES_CTL_ADC_EN           (1U << 4)
+#define CT_CONTROL_P2_BYPASS         (1U << 30)
+#define CT_CONTROL_AC97_SYNC_RESET   (1U << 14)
+#define CT_CONTROL_BUS_MASTER_REQ    (1U << 7)
+#define CT_CONTROL_DAC1_ENABLE       (1U << 6)
+#define CT_CONTROL_DAC2_ENABLE       (1U << 5)
+#define CT_CONTROL_ADC_ENABLE        (1U << 4)
 
 // Status register bits.
-#define ES_STAT_AC97_RST        (1U << 29) // CT5880/ES1373 codec reset quirk
+#define CT_STATUS_AC97_RESET         (1U << 29)
 
-// Serial control register bits.
-#define ES_P2_END_INCO(o)       (((o) & 0x07) << 19)
-#define ES_P2_END_INCM          (0x07U << 19)
-#define ES_P2_ST_INCO(o)        (((o) & 0x07) << 16)
-#define ES_P2_ST_INCM           (0x07U << 16)
-#define ES_P2_LOOP_SEL          (1U << 14)
-#define ES_P2_PAUSE             (1U << 12)
-#define ES_P2_INT_EN            (1U << 9)
-#define ES_P2_DAC_SEN           (1U << 6)
-#define ES_P2_MODEO(o)          (((o) & 0x03) << 2)
-#define ES_P2_MODEM             (0x03U << 2)
+// Serial channel 2 control fields.
+#define CT_SERIAL_P2_END_INC(slot)   (((slot) & 0x07) << 19)
+#define CT_SERIAL_P2_END_MASK        (0x07U << 19)
+#define CT_SERIAL_P2_START_INC(slot) (((slot) & 0x07) << 16)
+#define CT_SERIAL_P2_START_MASK      (0x07U << 16)
+#define CT_SERIAL_P2_LOOPBACK        (1U << 14)
+#define CT_SERIAL_P2_PAUSE           (1U << 12)
+#define CT_SERIAL_P2_INTERRUPT       (1U << 9)
+#define CT_SERIAL_P2_DAC_SLOT_ENABLE (1U << 6)
+#define CT_SERIAL_P2_MODE(mode)      (((mode) & 0x03) << 2)
+#define CT_SERIAL_P2_MODE_MASK       (0x03U << 2)
 
-// Sample rate converter register bits and RAM addresses.
-#define ES_1371_SRC_RAM_ADDRM   (0x7FU << 25)
-#define ES_1371_SRC_RAM_ADDRO(r) (((r) & 0x7FU) << 25)
-#define ES_1371_SRC_RAM_WE      (1U << 24)
-#define ES_1371_SRC_RAM_BUSY    (1U << 23)
-#define ES_1371_SRC_DISABLE     (1U << 22)
-#define ES_1371_DIS_P1          (1U << 21)
-#define ES_1371_DIS_P2          (1U << 20)
-#define ES_1371_DIS_R1          (1U << 19)
+// Sample-rate converter control fields and RAM locations.
+#define CT_SRC_RAM_ADDRESS_MASK      (0x7FU << 25)
+#define CT_SRC_RAM_ADDRESS(reg)      (((reg) & 0x7FU) << 25)
+#define CT_SRC_RAM_WRITE_ENABLE      (1U << 24)
+#define CT_SRC_RAM_BUSY              (1U << 23)
+#define CT_SRC_DISABLE               (1U << 22)
+#define CT_SRC_DAC1_DISABLE          (1U << 21)
+#define CT_SRC_DAC2_DISABLE          (1U << 20)
+#define CT_SRC_ADC_DISABLE           (1U << 19)
 
-#define ES_SMPREG_DAC1          0x70
-#define ES_SMPREG_DAC2          0x74
-#define ES_SMPREG_ADC           0x78
-#define ES_SMPREG_VOL_ADC       0x6C
-#define ES_SMPREG_VOL_DAC1      0x7C
-#define ES_SMPREG_VOL_DAC2      0x7E
-#define ES_SMPREG_TRUNC_N       0x00
-#define ES_SMPREG_INT_REGS      0x01
-#define ES_SMPREG_VFREQ_FRAC    0x03
+#define CT_SRC_DAC1_BASE             0x70
+#define CT_SRC_DAC2_BASE             0x74
+#define CT_SRC_ADC_BASE              0x78
+#define CT_SRC_ADC_VOLUME_BASE       0x6C
+#define CT_SRC_DAC1_VOLUME_BASE      0x7C
+#define CT_SRC_DAC2_VOLUME_BASE      0x7E
+#define CT_SRC_TRUNCATION            0x00
+#define CT_SRC_INTEGER_FREQUENCY     0x01
+#define CT_SRC_FRACTIONAL_FREQUENCY  0x03
 
-// AC'97 codec port bits and registers.
-#define ES_1371_CODEC_RDY       (1U << 31)
-#define ES_1371_CODEC_WIP       (1U << 30)
-#define ES_1371_CODEC_READ      (1U << 23)
-#define EV_1938_CODEC_MAGIC     (1U << 26)
-#define AC97_RESET              0x00
-#define AC97_MASTER_VOLUME      0x02
-#define AC97_HEADPHONE_VOLUME   0x04
-#define AC97_PCM_OUT_VOLUME     0x18
-#define AC97_VENDOR_ID1         0x7C
-#define AC97_VENDOR_ID2         0x7E
+// AC'97 codec port bits and standard registers.
+#define CT_CODEC_READY               (1U << 31)
+#define CT_CODEC_WRITE_BUSY          (1U << 30)
+#define CT_CODEC_READ_REQUEST        (1U << 23)
+#define CT_EV1938_CODEC_ACCESS       (1U << 26)
+#define CT_AC97_RESET                0x00
+#define CT_AC97_MASTER_VOLUME        0x02
+#define CT_AC97_HEADPHONE_VOLUME     0x04
+#define CT_AC97_PCM_OUT_VOLUME       0x18
+#define CT_AC97_VENDOR_ID1           0x7C
+#define CT_AC97_VENDOR_ID2           0x7E
 
 // DMA Ring Buffer Dimensions: 64KB total, two 32KB halves
 #define CT_DMA_BUFFER_BYTES     65536

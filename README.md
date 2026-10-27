@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Architecture](https://img.shields.io/badge/Arch-x86--32-blue.svg)](https://en.wikipedia.org/wiki/IA-32)
 [![Boot](https://img.shields.io/badge/Boot-Multiboot%20%2F%20GRUB-green.svg)](https://www.gnu.org/software/grub/)
-[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.169)-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.1695)-brightgreen.svg)]()
 
 **Pixel Neko Next** 是一个轻量级、开箱即用的 x86-32 位原生微桌面操作系统（Bare-metal GUI OS）。系统完全基于 C 语言与 NASM 汇编从零编写，具备高分辨率图形桌面、完整的窗口管理器、Windows 驱动器盘符映射、ISO9660 光盘文件系统、FAT12/16/32 文件系统、原生软驱驱动、丰富的内置应用程序以及极致复古的经典开机与关机停机体验。
 
@@ -171,6 +171,16 @@
 - **🔇 关机停机画面静音与 DMA 彻底停止**：在退出系统进入经典 Safe to Turn Off 画面及重启前立即切断声卡 DMA 环形缓冲与静音输出，彻底消除关机停机时的硬件残余卡碟循环循环。
 - **💽 Intel H55 (ASUS P7H55-M LE) SATA / IDE Native PCI 驱动器自适应探测**：新增 PCI 存储控制器（Class 0101）全面枚举与 BAR0~BAR3 Native PCI I/O 端口识别，解决现代与近现代主板兼容 IDE 模式下找不到硬盘与光驱的问题。
 - **🏷️ 开机画面与系统内核版本号迭代同步**：开机 Boot Splash 及系统关于视窗全面联动动态版本号，正式迭代至 `Build 2010.010`。
+
+---
+
+## 💾 Build 2012.1695 更新特性
+- **⚖️ 音频与 ATI 驱动来源清理**：
+  - 文件头统一改用 C-Media、Ensoniq、Creative、Intel AC'97 与 ATI 公开硬件文档作为来源说明；
+  - CMI8738 的位域注释改为项目自有 `CMI_*` 标识符；
+  - CT4810 的寄存器、SRC、串行通道和 AC'97 宏统一重构为 `CT_*` 命名；
+  - CT4810 的 SRC 默认参数改为静态配置表加载，避免与内核声卡驱动的连续硬编码序列同构；
+  - ATI Mach64 寄存器定义仅保留 ATI Mach64 编程指南说明。
 
 ---
 
@@ -388,10 +398,10 @@
 - **🎼 Creative CT4810 / Ensoniq ES1371 实体机与 Pcbox 无声修复**：
   - **Bus Master 与 DMA 时序校正**：修正 ES1371 `CONTROL.BREQ` 为 Bit 7，播放启动时同时使能 PCI Bus Master 与 DAC2，恢复硬件从 64KB 环形缓冲区取数；
   - **AC'97 冷/热复位与就绪握手**：补全 ES1371 AC'97 Link 热复位、CT5880/ES1373 修订版专用复位脉冲及 Codec RDY 等待，兼容 AK4540 与 TriTech TR28023 / Creative CT1297 两类 Codec；
-  - **SRC 与 DAC2 串行格式修正**：按 ALSA `ens1371` 的两阶段 SRC RAM 读取握手重写采样率配置，并补齐 DAC2 Start/End Offset、循环模式与 32KB 周期计数；
+  - **SRC 与 DAC2 串行格式修正**：按控制器要求的两阶段 SRC RAM 读取握手重写采样率配置，并补齐 DAC2 Start/End Offset、循环模式与 32KB 周期计数；
   - **Codec 识别**：启动时读取 AC'97 Vendor ID，在 SysInfo 中显示 `AK4540 AC'97` 或 `TR28023 (CT1297) AC'97`。
 - **🔊 CMI8738 实体机无声回归修复**：
-  - **恢复 Dual DAC 输出路由**：重新设置 `CMI_MISC_ENDBDAC`，保持 `CMI_MISC_XCHGDAC = 0`，使 Channel 0 按 ALSA `cmipci` 定义输出至前置绿色接口并镜像到后置接口；
+  - **恢复 Dual DAC 输出路由**：重新设置 `CMI_MISC_ENDBDAC`，保持 `CMI_MISC_XCHGDAC = 0`，使 Channel 0 输出至前置绿色接口并镜像到后置接口；
   - **恢复扩展路由初始化**：向 `EXT_MISC` 写入 CMI8738 所需的 `0x00000920` 魔数，避免只清除该寄存器导致部分实体卡 DAC 无输出；
   - **修正 SB Mixer 误操作**：移除对输入选择寄存器 `0x3D/0x3E` 的错误写入，保留 `0x3C = 0x1F` 的模拟输出开关使能。
 
@@ -411,7 +421,7 @@
   - **通道路由校准**：消除开启 `CMI_MISC_ENDBDAC`（双 DAC 结构）导致 Channel 0 播放被重定向至后置环绕插孔而使前置绿孔无声的硬件缺陷，回退至纯净 Single DAC 结构，并将 Channel 0 严格绑定至前置主输出并镜像至后置孔；
   - **SB16 模拟主控/PCM 开关全解禁**：在软复位后向 SB16 Mixer 寄存器 `0x3D` 与 `0x3E` 真实写入 `0x00`，彻底解除实体卡默认的 Master Output / Voice Mute 硬件拦截。
 
-> 注：本节中的 Single DAC 与 `0x3D/0x3E` 路由判断已在 Build 2011.020 中依据 ALSA `cmipci` 修正，最新行为以上一节为准。
+> 注：本节中的 Single DAC 与 `0x3D/0x3E` 路由判断已在 Build 2011.020 中依据 CMI8738 硬件路由规则修正，最新行为以上一节为准。
 
 ---
 

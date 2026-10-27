@@ -1,19 +1,15 @@
 /*
  * ATI Mach64 / 3D Rage II+ hardware driver for 2D acceleration.
  *
- * Register layouts, base probing heuristics, and engine FIFO handling
- * are referenced from the Linux atyfb driver (drivers/video/fbdev/aty/)
- * and the ATI Mach64 Programmer's Guide.
+ * Register layouts, aperture discovery, and 2D engine programming follow
+ * the public ATI Mach64 Programmer's Guide.
  */
 
 #include "ati_mach64.h"
 #include "port.h"
 #include "pci.h"
 
-// ----------------------------------------------------------------------------
 // ATI Mach64 / 3D Rage II+DVD 2D hardware driver.
-// Register layouts follow Linux atyfb and the Mach64 register reference.
-// ----------------------------------------------------------------------------
 
 static int g_ati_active = 0;
 static const char* g_ati_chip_name = "None";
@@ -246,7 +242,7 @@ int ati_mach64_enable_native_32bpp(int w, int h) {
     mach64_write32(MACH64_CRTC_GEN_CNTL, gen_cntl);
 
     // Integrated Mach64/Rage parts use MEM_CNTL bits 27:20 for the memory
-    // pixel mode. 32bpp selects the same mode Linux atyfb calls 0x08.
+    // pixel mode. The 32-bit pixel format field value is 0x08.
     unsigned int mem_cntl = mach64_read32(MACH64_MEM_CNTL);
     mem_cntl &= 0xF00FFFFFU;
     mem_cntl |= 0x08000000U;
