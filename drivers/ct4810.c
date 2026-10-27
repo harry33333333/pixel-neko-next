@@ -1,3 +1,9 @@
+/*
+ * Portions of the hardware register access logic, timing sequences,
+ * and AC'97/mixer quirks are inspired by the Linux ALSA driver implementations
+ * (sound/pci/es1371.c and sound/pci/cmipci.c).
+ */
+
 #include "ct4810.h"
 #include "port.h"
 #include "mm.h"

@@ -1,3 +1,11 @@
+/*
+ * ATI Mach64 / 3D Rage II+ hardware driver for 2D acceleration.
+ *
+ * Register layouts, base probing heuristics, and engine FIFO handling
+ * are referenced from the Linux atyfb driver (drivers/video/fbdev/aty/)
+ * and the ATI Mach64 Programmer's Guide.
+ */
+
 #include "ati_mach64.h"
 #include "port.h"
 #include "pci.h"
