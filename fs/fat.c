@@ -1,6 +1,3 @@
-#include "calc.h"
-#include "font.h"
-#include "wm.h"
 #include "fat.h"
 #include "disk.h"
 #include "vfs.h"

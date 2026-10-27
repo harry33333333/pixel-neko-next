@@ -1,0 +1,28 @@
+{
+    "configurations": [
+        {
+            "name": "Pixel Neko Next (GCC x86)",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}"
+            ],
+            "defines": [],
+            "cStandard": "gnu11",
+            "intelliSenseMode": "gcc-x86",
+            "compilerArgs": [
+                "-m32",
+                "-march=pentiumpro",
+                "-ffreestanding",
+                "-nostdlib",
+                "-nostartfiles",
+                "-fno-builtin",
+                "-fno-stack-protector",
+                "-fno-pie",
+                "-mno-mmx",
+                "-mno-sse",
+                "-mno-sse2"
+            ]
+        }
+    ],
+    "version": 4
+}

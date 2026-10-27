@@ -24,9 +24,6 @@ static int rs_dir(int mx, int my, int wx, int wy, int ww, int wh);
 #include "installer.h"
 #include "vfs.h"
 
-// 双击判定的 tick 阈值（100Hz 下 55 ticks = 550ms）
-#define DOUBLE_CLICK_TICKS 55
-
 int redraw = 0;
 static int need_mr = 0;
 
@@ -77,6 +74,7 @@ static int icon_press_ox = 0, icon_press_oy = 0;
 static int icon_press_moved = 0;
 static int menu_open = 0, menu_index = -1;
 extern volatile int global_tick;
+static int input_event_tick = -1;
 static int last_click_icon = -1, last_s = -1;
 // Track previous click release for double-click timing (separate from visual selection)
 static int last_click_icon_prev = -1, last_click_time_prev = 0;
@@ -790,6 +788,10 @@ static int rs_dir(int mx, int my, int wx, int wy, int ww, int wh) {
 }
 int wm_is_dragging(void){return dragging;}
 int wm_need_mouse_reset(void){int r=need_mr;need_mr=0;return r;}
+void wm_set_input_event_tick(int tick){input_event_tick=tick;}
+int wm_get_input_event_tick(void){
+    return input_event_tick >= 0 ? input_event_tick : global_tick;
+}
 
 void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_release)
 {
@@ -975,7 +977,9 @@ void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_re
         }
         if (clicked_icon != -1) {
             // Check double-click on PRESS (instantaneous response, like native Windows)
-            if (last_click_icon_prev == clicked_icon && (global_tick - last_click_time_prev) < DOUBLE_CLICK_TICKS) {
+            if (last_click_icon_prev == clicked_icon &&
+                (wm_get_input_event_tick() - last_click_time_prev) <
+                WM_DOUBLE_CLICK_TICKS) {
                 open_icon_app(clicked_icon);
                 return;
             }
@@ -1044,12 +1048,14 @@ void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_re
             }
         } else {
             if (!icon_press_moved && in_icon(mx, my, icon_pressed)) {
-                if (last_click_icon_prev == icon_pressed && (global_tick - last_click_time_prev) < DOUBLE_CLICK_TICKS) {
+                if (last_click_icon_prev == icon_pressed &&
+                    (wm_get_input_event_tick() - last_click_time_prev) <
+                    WM_DOUBLE_CLICK_TICKS) {
                     open_icon_app(icon_pressed);
                     return;
                 } else {
                     last_click_icon_prev = icon_pressed;
-                    last_click_time_prev = global_tick;
+                    last_click_time_prev = wm_get_input_event_tick();
                     redraw = 1;
                 }
             }

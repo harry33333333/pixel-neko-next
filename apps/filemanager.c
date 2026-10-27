@@ -623,13 +623,15 @@ void fm_click(unsigned char* v, int mx, int my, int mb, int wx, int wy, int ww, 
         int y = wy + 62 + i * FM_ROW_H;
 
         if (mx >= wx + 4 && mx < sb_x - 2 && my >= y && my < y + FM_ROW_H) {
-            if (last_click_idx == idx && (global_tick - last_click_time) < 55) {
+            if (last_click_idx == idx &&
+                (wm_get_input_event_tick() - last_click_time) <
+                WM_DOUBLE_CLICK_TICKS) {
                 open_file(idx);
                 last_click_idx = -1;
             } else {
                 selected = idx;
                 last_click_idx = idx;
-                last_click_time = global_tick;
+                last_click_time = wm_get_input_event_tick();
                 redraw = 1;
             }
             return;

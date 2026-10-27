@@ -569,7 +569,7 @@ void kernel_main(void)
     splash_run();
 
     unsigned char* v = backbuffer;
-    int mx, my, mb, last_mx = -1, last_my = -1, last_mb = 0;
+    int mx, my, mb, last_mx = -1, last_my = -1;
 
     settings_init();
     settings_load();
@@ -601,21 +601,33 @@ void kernel_main(void)
 
         ps2_poll_input();
         mouse_get(&mx, &my, &mb);
-        int mb_press = (mb & 1) && !(last_mb & 1);
-        int mb_release = !(mb & 1) && (last_mb & 1);
-        last_mb = mb;
+
+        mouse_button_event_t events[16];
+        int event_count = 0;
+        int has_press = 0;
+        while (event_count < 16 &&
+               mouse_take_button_event(&events[event_count])) {
+            if (events[event_count].pressed) has_press = 1;
+            event_count++;
+        }
 
         int mr = wm_need_mouse_reset();
         int moved = (mx != last_mx || my != last_my);
 
-        if (!hardware_cursor && (mr || moved)) {
+        if (!hardware_cursor && (mr || moved || has_press)) {
             if (last_mx >= 0) {
                 mouse_reset(v);
                 copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
             }
         }
 
-        wm_update(v, mx, my, mb, mb_press, mb_release);
+        for (int i = 0; i < event_count; i++) {
+            wm_set_input_event_tick(events[i].tick);
+            wm_update(v, events[i].x, events[i].y, events[i].buttons,
+                      events[i].pressed, events[i].released);
+        }
+        wm_set_input_event_tick(-1);
+        wm_update(v, mx, my, mb, 0, 0);
         int new_mr = wm_need_mouse_reset();
         if (new_mr) {
             mr = 1;
@@ -638,7 +650,7 @@ void kernel_main(void)
             mouse_draw(v);
             copy_fullscreen_to_lfb(v);
             last_mx = mx; last_my = my;
-        } else if (mr || moved) {
+        } else if (mr || moved || has_press) {
             mouse_draw(v);
             copy_rect_to_lfb(v, mx, my, 16, 16);
             last_mx = mx; last_my = my;

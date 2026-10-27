@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Architecture](https://img.shields.io/badge/Arch-x86--32-blue.svg)](https://en.wikipedia.org/wiki/IA-32)
 [![Boot](https://img.shields.io/badge/Boot-Multiboot%20%2F%20GRUB-green.svg)](https://www.gnu.org/software/grub/)
-[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.1695)-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.1696)-brightgreen.svg)]()
 
 **Pixel Neko Next** 是一个轻量级、开箱即用的 x86-32 位原生微桌面操作系统（Bare-metal GUI OS）。系统完全基于 C 语言与 NASM 汇编从零编写，具备高分辨率图形桌面、完整的窗口管理器、Windows 驱动器盘符映射、ISO9660 光盘文件系统、FAT12/16/32 文件系统、原生软驱驱动、丰富的内置应用程序以及极致复古的经典开机与关机停机体验。
 
@@ -132,12 +132,12 @@
 - **多显卡显示与 2D 后端**：支持标准 VBE、VMware SVGA II、ATI Mach64/3D Rage II+ 与 NVIDIA G7x PCIe 显示设备；提供分辨率、色深、Pitch、显存探测、硬件 2D 或线性 Framebuffer 以及安全软件回退。
 - **高分辨率与多色深**：支持从经典低分辨率到 1280×1024 的多种显示模式，并在硬件或 VBE 能力允许时提供 8/16/24/32 位输出。
 - **多平台音频支持**：支持 Intel/VMware HDAudio、VIA VT1708S、Ensoniq ES1371/CT4810、CMI8738/C3DX 与标准 AC'97 混音和输出路径，兼容 44.1kHz 与 48kHz PCM 播放。
-- **统一输入与桌面交互**：使用 PIT、PIC、PS/2 键鼠与中断派发提供键盘输入、鼠标移动、窗口拖动、缩放、双击和桌面操作。
+- **统一输入与桌面交互**：使用 PIT、PIC、PS/2 键鼠与中断派发提供键盘输入、流畅鼠标移动、按键边沿锁存、可靠双击、窗口拖动、缩放和桌面操作。
 - **存储与文件系统**：提供 VFS、Windows 风格盘符、FAT12/FAT16/FAT32、ISO9660/Joliet、MBR 分区、ATA/ATAPI 光硬盘与原生软驱支持。
 - **完整内置应用**：包含文件管理器、文本编辑器、音乐播放器、图片查看器、控制面板、系统信息、计算器、拼图、安装器等桌面程序。
 - **启动、电源与诊断能力**：提供复古启动动画、分级重启与关机、ACPI/APM 电源处理、串口日志、PCI 设备查看以及图形化异常/崩溃视窗。
 - **可维护的平台层**：统一 PCI/BAR、IRQ、DMA、MMIO、物理内存、驱动注册、模式切换和失败回退机制，便于继续扩展硬件与系统能力。
-- **可重复构建与自动发布**：使用 Makefile、GRUB 与 GitHub Actions 自动生成可启动 ISO、源码包和版本 Release。
+- **可重复构建与自动发布**：使用 Makefile、GRUB 与 GitHub Actions 自动生成可启动 ISO、源码包和版本 Release，并提供 clangd/VS Code 的 32 位项目编译参数。
 
 ---
 

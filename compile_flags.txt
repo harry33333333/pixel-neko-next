@@ -1,0 +1,16 @@
+-m32
+-march=pentiumpro
+-ffreestanding
+-nostdlib
+-nostartfiles
+-fno-builtin
+-fno-stack-protector
+-fno-pie
+-mno-mmx
+-mno-sse
+-mno-sse2
+-std=gnu11
+-Wall
+-Wextra
+-Iinclude
+-I.

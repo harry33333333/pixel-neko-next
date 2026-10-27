@@ -18,5 +18,6 @@ pause.md
 *.jpeg
 
 # Editor directories
-.vscode/
 .idea/
+.vscode/*
+!.vscode/c_cpp_properties.json

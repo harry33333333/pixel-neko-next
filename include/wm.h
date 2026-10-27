@@ -1,11 +1,15 @@
 #ifndef WM_H
 #define WM_H
 
+#define WM_DOUBLE_CLICK_TICKS 80
+
 void wm_init(void);
 void wm_update(unsigned char* v, int mx, int my, int mb, int mb_press, int mb_release);
 void wm_draw(unsigned char* v);
 int wm_is_dragging(void);
 int wm_need_mouse_reset(void);
+void wm_set_input_event_tick(int tick);
+int wm_get_input_event_tick(void);
 
 void copy_fullscreen_to_lfb(const unsigned char* s_buf);
 void copy_rect_to_lfb(const unsigned char* src, int rx, int ry, int rw, int rh);
