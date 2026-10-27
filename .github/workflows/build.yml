@@ -78,27 +78,14 @@ jobs:
           - VirtualBox / VMware: create a 32-bit Other/Unknown virtual machine and boot this ISO.
 
           ### Highlights
-          - P0 kernel foundation: PCI/BAR management, shared IRQ dispatch, DMA/MMIO helpers, serial ring logging and prioritized driver registration.
-          - P1 VMware SVGA II: 32bpp modes, FIFO 2D fill/copy/update, dirty-rectangle presentation, hardware cursor and safe VBE/linear-framebuffer fallback.
-          - PIT, PS/2 keyboard and PS/2 mouse now use hardware IRQs; CMI8738 and CT4810/ES1371 DMA buffers use the common DMA allocator.
-          - Existing ATI Mach64, CT4810/ES1371, CMI8738 and standard VBE fallback paths remain available.
-          - SVGA 3D-capable VMware profiles are accepted for 2D acceleration; full 3D rendering is not part of this release.
-          - Build 2012.001 fixes stalled SVGA presentation and frozen PS/2 input by using software-cursor and polling fallbacks.
-          - Build 2012.100 adds Intel/VMware HDAudio, VIA VT1708S routing, 44.1/48kHz streams and explicit SVGA 3D-capable 2D compatibility.
-          - Build 2012.101 fixes hidden PCI devices in System Information and adds exact VMware 15AD:1977 HDAudio probing with detailed fallback status.
-          - Build 2012.102 fixes HDA Connection List Node ID decoding for routable VMware HDA Codec output paths.
-          - Build 2012.103 fixes the HDA init return contract so the successfully routed codec is selected by the Audio HAL.
-          - Build 2012.104 fixes the 16-byte HDA Buffer Descriptor List layout required for valid VMware audio DMA.
-          - Build 2012.105 corrects VMware HDA volume direction and serializes stream teardown/restart for repeat playback.
-          - Build 2012.106 applies the verified HDA gain direction to physical VIA VT1708S codecs as well as VMware.
-          - Build 2012.150 adds safe NVIDIA G7x PCIe detection, PCIe/AGP filtering and native VBE LFB backend support for GeForce 7300 GT.
-          - Build 2012.160 exposes NVIDIA 7300 GT 1280x1024x32 with VBE VRAM detection while keeping large modes disabled on VBE, VMware and ATI backends.
-          - Build 2012.165 enables all 1280x1024 color depths on GeForce 7300 GT, removes software-cursor trails and accelerates high-resolution framebuffer copies.
-          - Build 2012.166 fixes software-cursor flicker during full framebuffer redraws while preserving drag and resize feedback.
-          - Build 2012.167 queues mouse button edges for reliable double-click, batches cursor updates, and removes synchronous waits from SVGA dirty-rectangle presentation.
-          - Build 2012.168 restores the smoother 2012.160 backbuffer cursor model while retaining queued click events and asynchronous SVGA presentation.
-          - Build 2012.169 fully restores the 2012.160 mouse, double-click, cursor, framebuffer-copy, and SVGA presentation path while retaining unrelated later fixes.
-          - Build 2012.1695 normalizes hardware-documentation attribution for the CMI8738, CT4810 and ATI Mach64 drivers and restructures CT4810 register naming and SRC initialization.
+          - Native x86-32 bare-metal graphical desktop built with C, NASM, Multiboot and GRUB.
+          - Multi-backend graphics for VBE, VMware SVGA II, ATI Mach64/Rage II+ and NVIDIA G7x, with resolution, color-depth and framebuffer fallback handling.
+          - Multi-platform audio for Intel/VMware HDAudio, VIA VT1708S, Ensoniq ES1371/CT4810, CMI8738/C3DX and AC'97, including 44.1kHz and 48kHz PCM.
+          - Unified PCI/BAR, IRQ, DMA, MMIO, physical-memory, driver-registration and error-fallback platform layers.
+          - VFS with Windows-style drive letters, FAT12/16/32, ISO9660/Joliet, MBR partitions, ATA/ATAPI storage and native floppy support.
+          - Integrated file manager, editor, media player, image viewer, control panel, system information, calculator, puzzle and installer applications.
+          - Retro boot animation, PS/2 keyboard and mouse input, staged power management, serial diagnostics and graphical crash recovery.
+          - Reproducible Makefile builds and GitHub Actions release automation for bootable ISO and source archives.
         draft: false
         prerelease: false
         files: |
