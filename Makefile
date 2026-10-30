@@ -46,6 +46,7 @@ C_SOURCES = kernel/kernel.c \
             drivers/usb_uhci.c \
             drivers/usb_hub.c \
             drivers/usb_hid.c \
+            drivers/vmware_mouse.c \
             drivers/disk.c \
             drivers/blkdev.c \
             drivers/isadma.c \

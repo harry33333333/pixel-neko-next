@@ -35,6 +35,7 @@
 #include "mouse.h"
 #include "log.h"
 #include "wm.h"
+#include "vmware_mouse.h"
 
 #define HID_MAX_DEVICES 8
 
@@ -82,6 +83,7 @@ typedef struct {
     int             last_control_tick;
     int             control_reports_logged;
     int             vmware_boot_protocol;
+    int             hypervisor_mouse;
     hid_mouse_layout_t mouse_layout;
     unsigned char   prev_report[16];
 } hid_device_t;
@@ -615,6 +617,14 @@ int usb_hid_attach(usb_device_t* dev)
     /* Detect Keyboard vs Mouse */
     if (vmware_mouse) {
         hid->type = HID_TYPE_MOUSE;
+        if (vmware_mouse_init() == 0) {
+            hid->hypervisor_mouse = 1;
+            log_printf("[HID  ] VMware USB mouse uses VMMouse "
+                       "button/position channel\n");
+        } else {
+            log_printf("[HID  ] VMware VMMouse unavailable; "
+                       "using USB report path\n");
+        }
         /*
          * VMware Virtual USB Mouse uses an absolute report:
          *   byte 0: buttons (bit 0: left, bit 1: right, bit 2: middle)
@@ -699,7 +709,7 @@ int usb_hid_attach(usb_device_t* dev)
             dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
             0x0B /* SET_PROTOCOL */, 1 /* Report */, dev->interface_number,
             (void*)0, 0);
-    } else if (vmware_mouse) {
+    } else if (vmware_mouse && !hid->hypervisor_mouse) {
         /*
          * VMware's report-protocol path exposes absolute coordinates but,
          * on several Workstation versions, never updates the button bits in
@@ -720,28 +730,32 @@ int usb_hid_attach(usb_device_t* dev)
     }
 
     if (vmware_mouse) {
-        int idle_ret = usb_control_msg(
-            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-            HID_REQ_SET_IDLE, 0, dev->interface_number, (void*)0, 0);
-        log_printf("[HID  ] VMware SET_IDLE result=%d\n", idle_ret);
-
-        if (hid->vmware_boot_protocol) {
-            log_printf("[HID  ] VMware boot mouse reports enabled\n");
+        if (hid->hypervisor_mouse) {
+            log_printf("[HID  ] VMware HID class setup handled by VMMouse\n");
         } else {
-            unsigned char control_report[16];
-            usb_memset(control_report, 0, sizeof(control_report));
-            int control_len = usb_control_msg(
-                dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
-                HID_REQ_GET_REPORT,
-                (HID_REPORT_INPUT << 8) | 0, dev->interface_number,
-                control_report, hid->report_len);
-            if (control_len > 0) {
-                hid->control_poll_enabled = 1;
-                apply_vmware_control_report(
-                    hid, control_report, control_len, "initial");
+            int idle_ret = usb_control_msg(
+                dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
+                HID_REQ_SET_IDLE, 0, dev->interface_number, (void*)0, 0);
+            log_printf("[HID  ] VMware SET_IDLE result=%d\n", idle_ret);
+
+            if (hid->vmware_boot_protocol) {
+                log_printf("[HID  ] VMware boot mouse reports enabled\n");
             } else {
-                log_printf("[HID  ] VMware GET_REPORT unsupported "
-                           "(result=%d)\n", control_len);
+                unsigned char control_report[16];
+                usb_memset(control_report, 0, sizeof(control_report));
+                int control_len = usb_control_msg(
+                    dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
+                    HID_REQ_GET_REPORT,
+                    (HID_REPORT_INPUT << 8) | 0, dev->interface_number,
+                    control_report, hid->report_len);
+                if (control_len > 0) {
+                    hid->control_poll_enabled = 1;
+                    apply_vmware_control_report(
+                        hid, control_report, control_len, "initial");
+                } else {
+                    log_printf("[HID  ] VMware GET_REPORT unsupported "
+                               "(result=%d)\n", control_len);
+                }
             }
         }
     } else {
@@ -788,6 +802,11 @@ void usb_hid_poll(void)
     for (int i = 0; i < g_hid_count; i++) {
         hid_device_t* hid = &g_hid_devices[i];
         if (!hid->dev || !hid->ep || !hid->dev->hci || !hid->dev->hci->intr_in) {
+            continue;
+        }
+
+        if (hid->hypervisor_mouse) {
+            vmware_mouse_poll();
             continue;
         }
 
