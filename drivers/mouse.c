@@ -212,13 +212,14 @@ void mouse_handle_byte(unsigned char d)
     buf[cycle++] = d;
     if (cycle == 3) {
         cycle = 0;
-        int old_btn = btn;
-        ps2_btn = buf[0] & 0x07;
-        btn = ps2_btn | usb_btn;
-
-        /* If an active USB mouse is present, USB mouse owns cursor position.
-         * Do not let emulated or coexisting PS/2 deltas jitter the cursor coordinates. */
+        /* If an active USB mouse is present, USB mouse exclusively owns
+         * cursor position and button state. Ignore coexisting PS/2 mouse deltas
+         * and button edges from VMware emulated 8042 to prevent click cancellations. */
         if (usb_hid_mouse_count() == 0) {
+            int old_btn = btn;
+            ps2_btn = buf[0] & 0x07;
+            btn = ps2_btn;
+
             int dx = buf[1];
             int dy = buf[2];
             if (buf[0] & 0x10) dx = dx - 256;
@@ -229,8 +230,9 @@ void mouse_handle_byte(unsigned char d)
             if (mx > screen_w - 1) mx = screen_w - 1;
             if (my < 0) my = 0;
             if (my > screen_h - 1) my = screen_h - 1;
+
+            queue_button_event(old_btn, btn, mx, my);
         }
-        queue_button_event(old_btn, btn, mx, my);
     }
     irq_restore_flags(flags);
 }
@@ -241,7 +243,7 @@ void mouse_handle_usb_report(int buttons, int dx, int dy, int dz)
     unsigned int flags = irq_save_flags();
     int old_btn = btn;
     usb_btn = buttons & 0x07;
-    btn = usb_btn | ps2_btn;
+    btn = usb_btn;
 
     int step_x = (dx * mouse_speed) / 2;
     if (dx != 0 && step_x == 0) step_x = (dx > 0) ? 1 : -1;
@@ -265,7 +267,7 @@ void mouse_handle_usb_absolute(int buttons, int x, int y)
     unsigned int flags = irq_save_flags();
     int old_btn = btn;
     usb_btn = buttons & 0x07;
-    btn = usb_btn | ps2_btn;
+    btn = usb_btn;
 
     mx = x;
     my = y;

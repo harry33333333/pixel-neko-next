@@ -271,7 +271,12 @@ static int hid_mouse_buttons(const hid_device_t* hid,
     if (hid && hid->dev &&
         hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
         hid->dev->product == HID_VMWARE_MOUSE_PID) {
-        return (len > 0) ? (report[0] & 0x07) : 0;
+        int b = (len > 0) ? (report[0] & 0x07) : 0;
+        if (b) return b;
+        if (len >= 2 && (report[1] & 0x07)) {
+            return report[1] & 0x07;
+        }
+        return 0;
     }
 
     const hid_mouse_layout_t* layout = hid ? &hid->mouse_layout : (const hid_mouse_layout_t*)0;
@@ -436,24 +441,10 @@ static void process_keyboard_report(hid_device_t* hid, const unsigned char* repo
 static void process_mouse_report(hid_device_t* hid, const unsigned char* report, int len)
 {
     const hid_mouse_layout_t* layout = &hid->mouse_layout;
-    if (len < 3) {
-        /*
-         * Some virtual HID devices send a button-only short report when the
-         * pointer coordinate is unchanged. Keep the pointer position and
-         * propagate the button edge instead of discarding the click.
-         */
-        int buttons = hid_mouse_buttons(hid, report, len);
-        int current_x = 0;
-        int current_y = 0;
-        mouse_get(&current_x, &current_y, (int*)0);
-        mouse_handle_usb_absolute(buttons, current_x, current_y);
-        return;
-    }
-
     if (!layout->valid) {
         int buttons = hid_mouse_buttons(hid, report, len);
-        signed char dx = (signed char)report[1];
-        signed char dy = (signed char)report[2];
+        signed char dx = (len >= 2) ? (signed char)report[1] : 0;
+        signed char dy = (len >= 3) ? (signed char)report[2] : 0;
         signed char dz = (len >= 4) ? (signed char)report[3] : 0;
         mouse_handle_usb_report(buttons, dx, dy, dz);
         return;
@@ -461,43 +452,66 @@ static void process_mouse_report(hid_device_t* hid, const unsigned char* report,
 
     int base_bit = 0;
     if (layout->report_id) {
-        if (len < 2 || report[0] != layout->report_id) return;
+        if (len < 1 || report[0] != layout->report_id) return;
         base_bit = 8;
     }
 
     int buttons = hid_mouse_buttons(hid, report, len);
 
-    unsigned int x_raw = hid_extract_bits(
-        report, len, base_bit + layout->x_bit, layout->x_size);
-    unsigned int y_raw = hid_extract_bits(
-        report, len, base_bit + layout->y_bit, layout->y_size);
-    int x_value = (layout->x_min < 0) ?
-                  hid_signed_bits(x_raw, layout->x_size) : (int)x_raw;
-    int y_value = (layout->y_min < 0) ?
-                  hid_signed_bits(y_raw, layout->y_size) : (int)y_raw;
-
-    if (layout->x_relative && layout->y_relative) {
-        mouse_handle_usb_report(buttons, x_value, y_value, 0);
-        return;
-    }
+    int need_x_bytes = (base_bit + layout->x_bit + layout->x_size + 7) / 8;
+    int need_y_bytes = (base_bit + layout->y_bit + layout->y_size + 7) / 8;
 
     int current_x = 0;
     int current_y = 0;
     mouse_get(&current_x, &current_y, (int*)0);
 
+    /* If relative mouse: delta coordinates */
+    if (layout->x_relative && layout->y_relative) {
+        int x_value = 0, y_value = 0;
+        if (len >= need_x_bytes) {
+            unsigned int x_raw = hid_extract_bits(
+                report, len, base_bit + layout->x_bit, layout->x_size);
+            x_value = (layout->x_min < 0) ?
+                      hid_signed_bits(x_raw, layout->x_size) : (int)x_raw;
+        }
+        if (len >= need_y_bytes) {
+            unsigned int y_raw = hid_extract_bits(
+                report, len, base_bit + layout->y_bit, layout->y_size);
+            y_value = (layout->y_min < 0) ?
+                      hid_signed_bits(y_raw, layout->y_size) : (int)y_raw;
+        }
+        mouse_handle_usb_report(buttons, x_value, y_value, 0);
+        return;
+    }
+
+    /* Absolute pointing device */
     int screen_x = current_x;
     int screen_y = current_y;
-    if (layout->x_relative) {
-        screen_x += x_value;
-    } else if (layout->x_max > layout->x_min) {
-        screen_x = (x_value - layout->x_min) * (screen_w - 1) /
-                   (layout->x_max - layout->x_min);
+
+    if (len >= need_x_bytes) {
+        unsigned int x_raw = hid_extract_bits(
+            report, len, base_bit + layout->x_bit, layout->x_size);
+        int x_value = (layout->x_min < 0) ?
+                      hid_signed_bits(x_raw, layout->x_size) : (int)x_raw;
+        if (layout->x_relative) {
+            screen_x += x_value;
+        } else if (layout->x_max > layout->x_min) {
+            screen_x = (x_value - layout->x_min) * (screen_w - 1) /
+                       (layout->x_max - layout->x_min);
+        }
     }
-    if (layout->y_relative) {
-        screen_y += y_value;
-    } else if (layout->y_max > layout->y_min) {
-        screen_y = (y_value - layout->y_min) * (screen_h - 1) /
-                   (layout->y_max - layout->y_min);
+
+    if (len >= need_y_bytes) {
+        unsigned int y_raw = hid_extract_bits(
+            report, len, base_bit + layout->y_bit, layout->y_size);
+        int y_value = (layout->y_min < 0) ?
+                      hid_signed_bits(y_raw, layout->y_size) : (int)y_raw;
+        if (layout->y_relative) {
+            screen_y += y_value;
+        } else if (layout->y_max > layout->y_min) {
+            screen_y = (y_value - layout->y_min) * (screen_h - 1) /
+                       (layout->y_max - layout->y_min);
+        }
     }
 
     mouse_handle_usb_absolute(buttons, screen_x, screen_y);
@@ -586,12 +600,12 @@ int usb_hid_attach(usb_device_t* dev)
         hid->mouse_layout.x_bit = 16;
         hid->mouse_layout.x_size = 16;
         hid->mouse_layout.x_min = 0;
-        hid->mouse_layout.x_max = 65535;
+        hid->mouse_layout.x_max = 32767;
         hid->mouse_layout.x_relative = 0;
         hid->mouse_layout.y_bit = 32;
         hid->mouse_layout.y_size = 16;
         hid->mouse_layout.y_min = 0;
-        hid->mouse_layout.y_max = 65535;
+        hid->mouse_layout.y_max = 32767;
         hid->mouse_layout.y_relative = 0;
 
         hid->report_len = ep->max_packet;
@@ -646,10 +660,12 @@ int usb_hid_attach(usb_device_t* dev)
         }
     }
 
-    /* Set Idle Rate to 0 (only report changes). */
-    usb_control_msg(dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-                    0x0A /* SET_IDLE */, 0, dev->interface_number,
-                    (void*)0, 0);
+    if (!vmware_mouse) {
+        /* Set Idle Rate to 0 (only report changes). */
+        usb_control_msg(dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
+                        0x0A /* SET_IDLE */, 0, dev->interface_number,
+                        (void*)0, 0);
+    }
 
     g_hid_count++;
     hid_recompute_controllers();

@@ -413,21 +413,31 @@ static int uhci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
         return -1;
     }
 
-    /* Packet transferred successfully */
     int report_len = (len > (int)sizeof(slot->buffer)) ?
                      (int)sizeof(slot->buffer) : len;
+
+    /* NAK means device has no new interrupt data.
+     * Do not copy stale buffer data and DO NOT advance toggle! */
+    if (status & UHCI_TD_NAK) {
+        uhci_rearm_intr_slot(slot, report_len);
+        return 0;
+    }
+
+    /* Packet transferred successfully */
     int received = uhci_td_actual_length(status);
     if (received > report_len) received = report_len;
     if (received > len) received = len;
     if (received > 0) {
         usb_memcpy(data, slot->buffer, (unsigned int)received);
+        slot->completions++;
+        slot->last_length = received;
+        slot->ep->toggle ^= 1;
+        uhci_rearm_intr_slot(slot, report_len);
+        return received;
     }
 
-    slot->completions++;
-    slot->last_length = received;
-    slot->ep->toggle ^= 1;
     uhci_rearm_intr_slot(slot, report_len);
-    return received;
+    return 0;
 }
 
 static void uhci_device_release(usb_hci_t* hci, usb_device_t* dev)

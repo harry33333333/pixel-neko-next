@@ -519,10 +519,13 @@ static int ehci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
 
     if (received > 0) {
         usb_memcpy(data, slot->buffer, (unsigned int)received);
+        ep->toggle ^= 1;
+        ehci_rearm_intr_slot(slot, report_len);
+        return received;
     }
-    ep->toggle ^= 1;
+
     ehci_rearm_intr_slot(slot, report_len);
-    return received;
+    return 0;
 }
 
 static void ehci_device_release(usb_hci_t* hci, usb_device_t* dev)
