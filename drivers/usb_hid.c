@@ -45,6 +45,10 @@
 #define HID_VMWARE_VENDOR_ID   0x0E0FU
 #define HID_VMWARE_MOUSE_PID   0x0003U
 
+#define HID_REQ_GET_REPORT     0x01U
+#define HID_REQ_SET_IDLE       0x0AU
+#define HID_REPORT_INPUT       0x01U
+
 #define HID_LOCAL_USAGE_MAX 32
 
 typedef struct {
@@ -74,6 +78,9 @@ typedef struct {
     int             button_reports_logged;
     unsigned int    report_count;
     int             last_debug_tick;
+    int             control_poll_enabled;
+    int             last_control_tick;
+    int             control_reports_logged;
     hid_mouse_layout_t mouse_layout;
     unsigned char   prev_report[16];
 } hid_device_t;
@@ -505,6 +512,36 @@ static void process_mouse_report(hid_device_t* hid, const unsigned char* report,
     mouse_handle_usb_absolute(buttons, screen_x, screen_y);
 }
 
+static void apply_vmware_control_report(hid_device_t* hid,
+                                        const unsigned char* report, int len,
+                                        const char* source)
+{
+    if (!hid || !report || len <= 0) return;
+
+    int buttons = hid_mouse_buttons(hid, report, len);
+    int previous = hid_mouse_buttons(
+        hid, hid->prev_report, hid->report_len);
+
+    if (hid->control_reports_logged < 16 ||
+        (buttons != previous && hid->button_reports_logged < 64)) {
+        if (buttons != previous) hid->button_reports_logged++;
+        hid->control_reports_logged++;
+        log_printf("[HIDCTL] %s len=%d btn=%d prev=%d raw="
+                   "%X %X %X %X %X %X %X %X\n",
+                   source, len, buttons, previous,
+                   report[0], len > 1 ? report[1] : 0,
+                   len > 2 ? report[2] : 0, len > 3 ? report[3] : 0,
+                   len > 4 ? report[4] : 0, len > 5 ? report[5] : 0,
+                   len > 6 ? report[6] : 0, len > 7 ? report[7] : 0);
+    }
+
+    int current_x = 0;
+    int current_y = 0;
+    mouse_get(&current_x, &current_y, (int*)0);
+    mouse_handle_usb_absolute(buttons, current_x, current_y);
+    hid->prev_report[0] = report[0];
+}
+
 static void recover_interrupt_endpoint(hid_device_t* hid)
 {
     if (!hid || !hid->dev || !hid->ep) return;
@@ -662,10 +699,31 @@ int usb_hid_attach(usb_device_t* dev)
             (void*)0, 0);
     }
 
-    if (!vmware_mouse) {
+    if (vmware_mouse) {
+        int idle_ret = usb_control_msg(
+            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
+            HID_REQ_SET_IDLE, 0, dev->interface_number, (void*)0, 0);
+        log_printf("[HID  ] VMware SET_IDLE result=%d\n", idle_ret);
+
+        unsigned char control_report[16];
+        usb_memset(control_report, 0, sizeof(control_report));
+        int control_len = usb_control_msg(
+            dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
+            HID_REQ_GET_REPORT,
+            (HID_REPORT_INPUT << 8) | 0, dev->interface_number,
+            control_report, hid->report_len);
+        if (control_len > 0) {
+            hid->control_poll_enabled = 1;
+            apply_vmware_control_report(
+                hid, control_report, control_len, "initial");
+        } else {
+            log_printf("[HID  ] VMware GET_REPORT unsupported (result=%d)\n",
+                       control_len);
+        }
+    } else {
         /* Set Idle Rate to 0 (only report changes). */
         usb_control_msg(dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-                        0x0A /* SET_IDLE */, 0, dev->interface_number,
+                        HID_REQ_SET_IDLE, 0, dev->interface_number,
                         (void*)0, 0);
     }
 
@@ -710,6 +768,28 @@ void usb_hid_poll(void)
         }
 
         extern volatile int global_tick;
+        if (hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
+            hid->dev->product == HID_VMWARE_MOUSE_PID &&
+            hid->control_poll_enabled &&
+            global_tick - hid->last_control_tick >= 2) {
+            hid->last_control_tick = global_tick;
+            unsigned char control_report[16];
+            usb_memset(control_report, 0, sizeof(control_report));
+            int control_len = usb_control_msg(
+                hid->dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
+                HID_REQ_GET_REPORT,
+                (HID_REPORT_INPUT << 8) | 0, hid->dev->interface_number,
+                control_report, hid->report_len);
+            if (control_len > 0) {
+                apply_vmware_control_report(
+                    hid, control_report, control_len, "poll");
+            } else {
+                hid->control_poll_enabled = 0;
+                log_printf("[HID  ] VMware GET_REPORT polling disabled "
+                           "(result=%d)\n", control_len);
+            }
+        }
+
         if (hid->report_seen &&
             global_tick - hid->last_debug_tick >= 100) {
             hid->last_debug_tick = global_tick;
