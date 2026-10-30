@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Architecture](https://img.shields.io/badge/Arch-x86--32-blue.svg)](https://en.wikipedia.org/wiki/IA-32)
 [![Boot](https://img.shields.io/badge/Boot-Multiboot%20%2F%20GRUB-green.svg)](https://www.gnu.org/software/grub/)
-[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.2000)-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.2000--pre1)-orange.svg)]()
 
 **Pixel Neko Next** 是一个轻量级、开箱即用的 x86-32 位原生微桌面操作系统（Bare-metal GUI OS）。系统完全基于 C 语言与 NASM 汇编从零编写，具备高分辨率图形桌面、完整的窗口管理器、Windows 驱动器盘符映射、ISO9660 光盘文件系统、FAT12/16/32 文件系统、原生软驱驱动、丰富的内置应用程序以及极致复古的经典开机与关机停机体验。
 
@@ -157,7 +157,7 @@ VMMouse 回退共同负责。该实现当前位于 `beta` 分支，实体机测�
    ```bash
    make
    ```
-   编译完成后会在根目录生成 `pixel_neko_build_2012.2000.iso`。
+   编译完成后会在根目录生成 `pixel_neko_build_2012.2000-pre1.iso`。
 
 2. **在 QEMU 虚拟机中一键运行**
    ```bash

@@ -68,6 +68,8 @@ jobs:
         body: |
           ## Pixel Neko Next ${{ env.TAG_NAME }}
 
+          > This is a pre-release beta build and is not marked as Latest.
+
           ### Release Assets
           - Bootable ISO image: `pixel_neko_build_${{ env.VERSION }}.iso`
           - Source archive: `pixel_neko_source_${{ env.VERSION }}.zip`
@@ -88,7 +90,8 @@ jobs:
           - Retro boot animation, PS/2 keyboard and mouse input with latched button edges and reliable double-click handling, staged power management, serial diagnostics and graphical crash recovery.
           - Reproducible Makefile builds and GitHub Actions release automation for bootable ISO and source archives.
         draft: false
-        prerelease: false
+        prerelease: true
+        make_latest: false
         files: |
           pixel_neko*.iso
           pixel_neko_source_*.zip
