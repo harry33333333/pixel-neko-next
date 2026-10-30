@@ -416,13 +416,6 @@ static int uhci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
     int report_len = (len > (int)sizeof(slot->buffer)) ?
                      (int)sizeof(slot->buffer) : len;
 
-    /* NAK means device has no new interrupt data.
-     * Do not copy stale buffer data and DO NOT advance toggle! */
-    if (status & UHCI_TD_NAK) {
-        uhci_rearm_intr_slot(slot, report_len);
-        return 0;
-    }
-
     /* Packet transferred successfully */
     int received = uhci_td_actual_length(status);
     if (received > report_len) received = report_len;
@@ -436,6 +429,7 @@ static int uhci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
         return received;
     }
 
+    /* No new data from device (empty or NAK); rearm and do not toggle */
     uhci_rearm_intr_slot(slot, report_len);
     return 0;
 }

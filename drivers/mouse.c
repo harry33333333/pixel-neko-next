@@ -173,8 +173,10 @@ void mouse_init(void)
 
 static void queue_button_event(int old_buttons, int new_buttons, int x, int y)
 {
-    int pressed = !(old_buttons & 1) && (new_buttons & 1);
-    int released = (old_buttons & 1) && !(new_buttons & 1);
+    int old_any = (old_buttons & 0x07) != 0;
+    int new_any = (new_buttons & 0x07) != 0;
+    int pressed = !old_any && new_any;
+    int released = old_any && !new_any;
     if (!pressed && !released && (old_buttons == new_buttons)) return;
 
     unsigned int next = (event_head + 1U) % MOUSE_EVENT_QUEUE_SIZE;
@@ -184,7 +186,7 @@ static void queue_button_event(int old_buttons, int new_buttons, int x, int y)
 
     button_events[event_head].x = x;
     button_events[event_head].y = y;
-    button_events[event_head].buttons = new_buttons;
+    button_events[event_head].buttons = new_buttons ? (new_buttons | 1) : 0;
     button_events[event_head].pressed = pressed;
     button_events[event_head].released = released;
     button_events[event_head].tick = global_tick;
@@ -212,14 +214,13 @@ void mouse_handle_byte(unsigned char d)
     buf[cycle++] = d;
     if (cycle == 3) {
         cycle = 0;
-        /* If an active USB mouse is present, USB mouse exclusively owns
-         * cursor position and button state. Ignore coexisting PS/2 mouse deltas
-         * and button edges from VMware emulated 8042 to prevent click cancellations. */
-        if (usb_hid_mouse_count() == 0) {
-            int old_btn = btn;
-            ps2_btn = buf[0] & 0x07;
-            btn = ps2_btn;
+        int old_btn = btn;
+        ps2_btn = buf[0] & 0x07;
+        btn = ps2_btn | usb_btn;
 
+        /* If an active USB mouse is present, USB mouse owns cursor position.
+         * Only allow PS/2 deltas to update coordinates when no USB mouse is present. */
+        if (usb_hid_mouse_count() == 0) {
             int dx = buf[1];
             int dy = buf[2];
             if (buf[0] & 0x10) dx = dx - 256;
@@ -230,7 +231,10 @@ void mouse_handle_byte(unsigned char d)
             if (mx > screen_w - 1) mx = screen_w - 1;
             if (my < 0) my = 0;
             if (my > screen_h - 1) my = screen_h - 1;
+        }
 
+        /* Forward button state transitions from PS/2 if button edge changed */
+        if (btn != old_btn) {
             queue_button_event(old_btn, btn, mx, my);
         }
     }
@@ -243,7 +247,7 @@ void mouse_handle_usb_report(int buttons, int dx, int dy, int dz)
     unsigned int flags = irq_save_flags();
     int old_btn = btn;
     usb_btn = buttons & 0x07;
-    btn = usb_btn;
+    btn = usb_btn | ps2_btn;
 
     int step_x = (dx * mouse_speed) / 2;
     if (dx != 0 && step_x == 0) step_x = (dx > 0) ? 1 : -1;
@@ -258,7 +262,9 @@ void mouse_handle_usb_report(int buttons, int dx, int dy, int dz)
     if (my < 0) my = 0;
     if (my > screen_h - 1) my = screen_h - 1;
 
-    queue_button_event(old_btn, btn, mx, my);
+    if (btn != old_btn) {
+        queue_button_event(old_btn, btn, mx, my);
+    }
     irq_restore_flags(flags);
 }
 
@@ -267,7 +273,7 @@ void mouse_handle_usb_absolute(int buttons, int x, int y)
     unsigned int flags = irq_save_flags();
     int old_btn = btn;
     usb_btn = buttons & 0x07;
-    btn = usb_btn;
+    btn = usb_btn | ps2_btn;
 
     mx = x;
     my = y;
@@ -276,7 +282,9 @@ void mouse_handle_usb_absolute(int buttons, int x, int y)
     if (my < 0) my = 0;
     if (my > screen_h - 1) my = screen_h - 1;
 
-    queue_button_event(old_btn, btn, mx, my);
+    if (btn != old_btn) {
+        queue_button_event(old_btn, btn, mx, my);
+    }
     irq_restore_flags(flags);
 }
 
@@ -297,7 +305,7 @@ void mouse_get(int* x, int* y, int* b)
     unsigned int flags = irq_save_flags();
     if (x) *x = mx;
     if (y) *y = my;
-    if (b) *b = btn;
+    if (b) *b = (btn & 0x07) ? (btn | 1) : 0;
     irq_restore_flags(flags);
 }
 

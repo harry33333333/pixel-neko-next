@@ -558,7 +558,9 @@ int usb_hid_attach(usb_device_t* dev)
     unsigned char report_desc[256];
     usb_memset(report_desc, 0, sizeof(report_desc));
     int report_desc_len = 0;
-    if (dev->interface_protocol == 0) {
+    if (dev->interface_protocol == 0 ||
+        dev->interface_protocol == USB_HID_PROTOCOL_MOUSE ||
+        vmware_mouse) {
         report_desc_len = usb_control_msg(
             dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_INTERFACE,
             USB_REQ_GET_DESCRIPTOR, (USB_DT_REPORT << 8) | 0,
@@ -645,11 +647,13 @@ int usb_hid_attach(usb_device_t* dev)
     }
 
     /*
-     * Boot protocol exists only for boot subclass interfaces. VMware's
-     * virtual mouse advertises protocol 0 (report protocol); sending an
-     * unsupported SET_PROTOCOL request can leave its HID endpoint unusable.
+     * Boot protocol exists only for boot subclass interfaces.
+     * Keyboards need Boot Protocol (0) so they report standard 8-byte
+     * scancodes. Pointing devices (especially VMware Virtual USB Mouse)
+     * must remain in Report Protocol (1) so absolute coordinates and
+     * multi-button descriptors are preserved and operational.
      */
-    if (dev->interface_protocol != 0) {
+    if (dev->interface_protocol == USB_HID_PROTOCOL_KBD) {
         int ret = usb_control_msg(
             dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
             0x0B /* SET_PROTOCOL */, 0, dev->interface_number,
@@ -658,6 +662,12 @@ int usb_hid_attach(usb_device_t* dev)
             log_printf("[HID  ] SET_PROTOCOL rejected on dev %u\n",
                        dev->address);
         }
+    } else if (dev->interface_protocol == USB_HID_PROTOCOL_MOUSE || vmware_mouse) {
+        /* Explicitly request Report Protocol (1) for mice */
+        usb_control_msg(
+            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
+            0x0B /* SET_PROTOCOL */, 1 /* Report */, dev->interface_number,
+            (void*)0, 0);
     }
 
     if (!vmware_mouse) {

@@ -515,8 +515,9 @@ static void ps2_poll_input(void)
 {
     unsigned int flags = irq_save_flags();
     int drained = 0;
-    while ((inb(0x64) & 0x01) && drained++ < 32) {
+    while (drained++ < 32) {
         unsigned char status = inb(0x64);
+        if (!(status & 0x01)) break;
         unsigned char data = inb(0x60);
         if (status & 0x20) mouse_handle_byte(data);
         else keyboard_handle_byte(data);
