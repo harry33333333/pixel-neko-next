@@ -17,7 +17,7 @@ static unsigned char buf[3];
 static int init_done = 1;
 static int ps2_initialized = 0;
 
-#define MOUSE_EVENT_QUEUE_SIZE 16
+#define MOUSE_EVENT_QUEUE_SIZE 64
 static mouse_button_event_t button_events[MOUSE_EVENT_QUEUE_SIZE];
 static volatile unsigned int event_head;
 static volatile unsigned int event_tail;
@@ -173,11 +173,11 @@ void mouse_init(void)
 
 static void queue_button_event(int old_buttons, int new_buttons, int x, int y)
 {
-    int old_any = (old_buttons & 0x07) != 0;
-    int new_any = (new_buttons & 0x07) != 0;
-    int pressed = !old_any && new_any;
-    int released = old_any && !new_any;
-    if (!pressed && !released && (old_buttons == new_buttons)) return;
+    int diff = (old_buttons ^ new_buttons) & 0x07;
+    if (!diff) return;
+
+    int pressed = (diff & new_buttons) != 0;
+    int released = (diff & old_buttons) != 0;
 
     unsigned int next = (event_head + 1U) % MOUSE_EVENT_QUEUE_SIZE;
     if (next == event_tail) {
@@ -186,14 +186,14 @@ static void queue_button_event(int old_buttons, int new_buttons, int x, int y)
 
     button_events[event_head].x = x;
     button_events[event_head].y = y;
-    button_events[event_head].buttons = new_buttons ? (new_buttons | 1) : 0;
+    button_events[event_head].buttons = new_buttons & 0x07;
     button_events[event_head].pressed = pressed;
     button_events[event_head].released = released;
     button_events[event_head].tick = global_tick;
     event_head = next;
 
     static int s_logged = 0;
-    if (s_logged < 16) {
+    if (s_logged < 32) {
         s_logged++;
         log_printf("[MOUSE] button event: old=%d new=%d press=%d rel=%d at (%d,%d)\n",
                    old_buttons, new_buttons, pressed, released, x, y);
@@ -305,7 +305,7 @@ void mouse_get(int* x, int* y, int* b)
     unsigned int flags = irq_save_flags();
     if (x) *x = mx;
     if (y) *y = my;
-    if (b) *b = (btn & 0x07) ? (btn | 1) : 0;
+    if (b) *b = btn & 0x07;
     irq_restore_flags(flags);
 }
 

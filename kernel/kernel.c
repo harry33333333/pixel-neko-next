@@ -607,19 +607,21 @@ void kernel_main(void)
         ps2_poll_input();
         mouse_get(&mx, &my, &mb);
 
-        mouse_button_event_t events[16];
+        mouse_button_event_t events[32];
         int event_count = 0;
-        int has_press = 0;
-        while (event_count < 16 &&
+        int has_event = 0;
+        while (event_count < 32 &&
                mouse_take_button_event(&events[event_count])) {
-            if (events[event_count].pressed) has_press = 1;
+            if (events[event_count].pressed || events[event_count].released) {
+                has_event = 1;
+            }
             event_count++;
         }
 
         int mr = wm_need_mouse_reset();
         int moved = (mx != last_mx || my != last_my);
 
-        if (!hardware_cursor && (mr || moved || has_press)) {
+        if (!hardware_cursor && (mr || moved || has_event)) {
             if (last_mx >= 0) {
                 mouse_reset(v);
                 copy_rect_to_lfb(v, last_mx, last_my, 16, 16);
@@ -657,7 +659,7 @@ void kernel_main(void)
             mouse_draw(v);
             copy_fullscreen_to_lfb(v);
             last_mx = mx; last_my = my;
-        } else if (mr || moved || has_press) {
+        } else if (mr || moved || has_event) {
             mouse_draw(v);
             copy_rect_to_lfb(v, mx, my, 16, 16);
             last_mx = mx; last_my = my;

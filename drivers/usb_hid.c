@@ -75,7 +75,7 @@ typedef struct {
     unsigned int    report_count;
     int             last_debug_tick;
     hid_mouse_layout_t mouse_layout;
-    unsigned char   prev_report[8];
+    unsigned char   prev_report[16];
 } hid_device_t;
 
 static unsigned int hid_item_value(const unsigned char* data, int size)
@@ -271,12 +271,7 @@ static int hid_mouse_buttons(const hid_device_t* hid,
     if (hid && hid->dev &&
         hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
         hid->dev->product == HID_VMWARE_MOUSE_PID) {
-        int b = (len > 0) ? (report[0] & 0x07) : 0;
-        if (b) return b;
-        if (len >= 2 && (report[1] & 0x07)) {
-            return report[1] & 0x07;
-        }
-        return 0;
+        return (len > 0) ? (report[0] & 0x07) : 0;
     }
 
     const hid_mouse_layout_t* layout = hid ? &hid->mouse_layout : (const hid_mouse_layout_t*)0;
@@ -302,14 +297,7 @@ static int hid_mouse_buttons(const hid_device_t* hid,
     }
 
     int byte = (layout && layout->report_id) ? 1 : 0;
-    int b = (byte < len) ? (report[byte] & 0x07) : 0;
-    if (b) return b;
-
-    /* Fallback: if byte 0 had no buttons, check byte 1 (for 16-bit button maps) */
-    if (len >= 2 && (!layout || !layout->report_id) && (report[1] & 0x07)) {
-        return report[1] & 0x07;
-    }
-    return 0;
+    return (byte < len) ? (report[byte] & 0x07) : 0;
 }
 
 static hid_device_t g_hid_devices[HID_MAX_DEVICES];
@@ -662,8 +650,12 @@ int usb_hid_attach(usb_device_t* dev)
             log_printf("[HID  ] SET_PROTOCOL rejected on dev %u\n",
                        dev->address);
         }
-    } else if (dev->interface_protocol == USB_HID_PROTOCOL_MOUSE || vmware_mouse) {
-        /* Explicitly request Report Protocol (1) for mice */
+    } else if (dev->interface_protocol == USB_HID_PROTOCOL_MOUSE && !vmware_mouse) {
+        /*
+         * Boot mouse interfaces can be switched to Report Protocol (1).
+         * VMware Virtual USB Mouse does not implement the boot subclass;
+         * querying or sending SET_PROTOCOL to it causes STALL, so leave it untouched.
+         */
         usb_control_msg(
             dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
             0x0B /* SET_PROTOCOL */, 1 /* Report */, dev->interface_number,
@@ -744,14 +736,8 @@ void usb_hid_poll(void)
             int prev_btn = hid_mouse_buttons(
                 hid, hid->prev_report, hid->report_len
             );
+            int button_edge = (curr_btn != prev_btn);
 
-            /* Check if any button-related bits changed */
-            int raw_button_changed =
-                ret > 0 &&
-                (report_buf[0] != hid->prev_report[0] ||
-                 (ret > 1 && report_buf[1] != hid->prev_report[1]) ||
-                 (ret > 6 && (report_buf[6] != hid->prev_report[6] ||
-                              report_buf[7] != hid->prev_report[7])));
             if (hid->type == HID_TYPE_KEYBOARD && ret >= 8) {
                 process_keyboard_report(hid, report_buf);
                 break;
@@ -759,14 +745,18 @@ void usb_hid_poll(void)
                 process_mouse_report(hid, report_buf, ret);
                 int copy_len = ret < (int)sizeof(hid->prev_report) ?
                                ret : (int)sizeof(hid->prev_report);
+                usb_memset(hid->prev_report, 0, sizeof(hid->prev_report));
                 usb_memcpy(hid->prev_report, report_buf, (unsigned int)copy_len);
 
                 /*
-                 * If button state flipped (pressed or released), stop draining
-                 * immediately so the window manager / OS loop sees this edge
-                 * before a subsequent report can overwrite it in the same poll!
+                 * Stop draining immediately when:
+                 * 1) Button state changed (press or release edge)
+                 * 2) Any button is currently pressed (hold down / drag)
+                 * This ensures the UI / window manager processes every button transition
+                 * and gets accurate 1-to-1 frames without high-speed mouse reports
+                 * swallowing edges or coalescing clicks!
                  */
-                if (curr_btn != prev_btn || raw_button_changed) {
+                if (button_edge || curr_btn != 0) {
                     break;
                 }
             }
