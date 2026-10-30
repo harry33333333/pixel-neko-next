@@ -69,6 +69,7 @@
 #define UHCI_TD_ERROR_MASK   (UHCI_TD_FATAL_MASK | UHCI_TD_NAK)
 
 #define UHCI_MAX_INTR_SLOTS  4
+#define UHCI_INTR_RING_SIZE  64
 
 typedef struct uhci_td {
     volatile unsigned int link;
@@ -89,14 +90,17 @@ typedef struct {
     usb_device_t*   dev;
     usb_endpoint_t* ep;
     uhci_qh_t       qh;
-    uhci_td_t       td;
-    unsigned char   buffer[64];
+    uhci_td_t       td[UHCI_INTR_RING_SIZE];
+    unsigned char   buffer[UHCI_INTR_RING_SIZE][64];
+    int             ring_read;
     unsigned int    polls;
     unsigned int    active_polls;
+    unsigned int    naks;
     unsigned int    completions;
     unsigned int    errors;
     unsigned int    last_status;
     int             last_length;
+    int             last_debug_tick;
 } uhci_intr_slot_t;
 
 typedef struct {
@@ -166,25 +170,57 @@ static void uhci_rebuild_schedule(uhci_controller_t* c)
     outw(c->io_base + 0x00, cmd | UHCI_USBCMD_RS);
 }
 
-static void uhci_rearm_intr_slot(uhci_intr_slot_t* slot, int len)
+static void uhci_prepare_intr_td(uhci_intr_slot_t* slot, int index,
+                                 int len, unsigned int toggle)
 {
-    if (!slot || len <= 0) return;
+    if (!slot || index < 0 || index >= UHCI_INTR_RING_SIZE || len <= 0) {
+        return;
+    }
 
     unsigned int address = slot->dev->address & 0x7F;
     unsigned int endpoint = slot->ep->address & 0x0F;
-    uhci_td_t* td = &slot->td;
+    uhci_td_t* td = &slot->td[index];
     usb_memset(td, 0, sizeof(*td));
     td->ctrl = UHCI_TD_ACTIVE | UHCI_TD_CERR_3 | UHCI_TD_SHORT_PACKET;
     if (slot->dev->speed == USB_SPEED_LOW) {
         td->ctrl |= UHCI_TD_LOW_SPEED;
     }
     td->token = 0x69U | (address << 8) | (endpoint << 15) |
-                ((slot->ep->toggle & 1U) << 19) |
+                ((toggle & 1U) << 19) |
                 (uhci_len_field(len) << 21);
-    td->buffer = (unsigned int)slot->buffer;
-    td->link = 1; /* Terminate link bit: hardware executes this single TD */
+    td->buffer = (unsigned int)slot->buffer[index];
 
-    slot->qh.element_link = (unsigned int)td;
+    int next = (index + 1) % UHCI_INTR_RING_SIZE;
+    td->link = (unsigned int)&slot->td[next];
+}
+
+static void uhci_arm_intr_ring(uhci_intr_slot_t* slot, int len)
+{
+    if (!slot || len <= 0) return;
+
+    slot->ring_read = 0;
+    unsigned int base_toggle = slot->ep->toggle & 1U;
+    for (int i = 0; i < UHCI_INTR_RING_SIZE; i++) {
+        uhci_prepare_intr_td(
+            slot, i, len, base_toggle ^ (unsigned int)(i & 1));
+    }
+    slot->qh.element_link = (unsigned int)&slot->td[0];
+}
+
+static void uhci_rearm_intr_entry(uhci_intr_slot_t* slot, int index, int len)
+{
+    uhci_prepare_intr_td(slot, index, len, slot->ep->toggle);
+}
+
+static void uhci_log_intr_state(uhci_intr_slot_t* slot, const char* reason)
+{
+    if (!slot) return;
+    log_printf("[UHCIH] %s dev=%u ep=%X ring=%d status=0x%X len=%d "
+               "poll=%u active=%u nak=%u done=%u err=%u qh=%X/%X\n",
+               reason, slot->dev->address, slot->ep->address, slot->ring_read,
+               slot->last_status, slot->last_length, slot->polls,
+               slot->active_polls, slot->naks, slot->completions,
+               slot->errors, slot->qh.head_link, slot->qh.element_link);
 }
 
 static uhci_intr_slot_t* uhci_find_intr_slot(uhci_controller_t* c,
@@ -384,22 +420,29 @@ static int uhci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
         slot->qh.head_link = 1;
         ep->hcd_priv = slot;
 
-        int report_len = (len > (int)sizeof(slot->buffer)) ?
-                         (int)sizeof(slot->buffer) : len;
-        uhci_rearm_intr_slot(slot, report_len);
+        int report_len = (len > 64) ? 64 : len;
+        uhci_arm_intr_ring(slot, report_len);
         uhci_rebuild_schedule(c);
         log_printf("[UHCI ] periodic HID slot dev %u endpoint 0x%X "
-                   "packet=%u interval=%u\n",
-                   dev->address, ep->address, ep->max_packet, ep->interval);
+                   "packet=%u interval=%u ring=%u\n",
+                   dev->address, ep->address, ep->max_packet,
+                   ep->interval, UHCI_INTR_RING_SIZE);
     }
 
-    unsigned int status = slot->td.ctrl;
+    int report_len = (len > 64) ? 64 : len;
+    int index = slot->ring_read;
+    uhci_td_t* td = &slot->td[index];
+    unsigned int status = td->ctrl;
     slot->polls++;
     slot->last_status = status;
 
     /* If the TD is still active in hardware, transfer is not complete (waiting or NAK) */
     if (status & UHCI_TD_ACTIVE) {
         slot->active_polls++;
+        if (global_tick - slot->last_debug_tick >= 100) {
+            slot->last_debug_tick = global_tick;
+            uhci_log_intr_state(slot, "heartbeat");
+        }
         return 0;
     }
 
@@ -408,29 +451,50 @@ static int uhci_intr_in(usb_hci_t* hci, usb_device_t* dev, usb_endpoint_t* ep,
         slot->errors++;
         log_printf("[UHCI ] periodic endpoint 0x%X dev %u failed (status=0x%X)\n",
                    ep->address, dev->address, status);
+        uhci_log_intr_state(slot, "error");
         ep->hcd_priv = (void*)0;
         uhci_release_intr_slot(c, dev);
         return -1;
     }
 
-    int report_len = (len > (int)sizeof(slot->buffer)) ?
-                     (int)sizeof(slot->buffer) : len;
+    /*
+     * NAK means that the device simply has no new report. The low status
+     * bits do not describe valid transfer data in this case. Copying the
+     * previous buffer here fabricates a click-free report and toggles
+     * DATA0/DATA1, which can hide the next button edge.
+     */
+    if (status & UHCI_TD_NAK) {
+        slot->naks++;
+        slot->last_length = 0;
+        uhci_rearm_intr_entry(slot, index, report_len);
+        if (slot->naks <= 4 ||
+            global_tick - slot->last_debug_tick >= 100) {
+            slot->last_debug_tick = global_tick;
+            uhci_log_intr_state(slot, "nak");
+        }
+        return 0;
+    }
 
     /* Packet transferred successfully */
     int received = uhci_td_actual_length(status);
     if (received > report_len) received = report_len;
     if (received > len) received = len;
     if (received > 0) {
-        usb_memcpy(data, slot->buffer, (unsigned int)received);
+        usb_memcpy(data, slot->buffer[index], (unsigned int)received);
         slot->completions++;
         slot->last_length = received;
         slot->ep->toggle ^= 1;
-        uhci_rearm_intr_slot(slot, report_len);
+        uhci_rearm_intr_entry(slot, index, report_len);
+        slot->ring_read = (index + 1) % UHCI_INTR_RING_SIZE;
+        if (received < report_len || slot->completions <= 4) {
+            uhci_log_intr_state(slot, "complete");
+        }
         return received;
     }
 
     /* No new data from device (empty or NAK); rearm and do not toggle */
-    uhci_rearm_intr_slot(slot, report_len);
+    slot->last_length = 0;
+    uhci_rearm_intr_entry(slot, index, report_len);
     return 0;
 }
 

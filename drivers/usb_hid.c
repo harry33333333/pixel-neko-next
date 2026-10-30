@@ -709,6 +709,18 @@ void usb_hid_poll(void)
             continue;
         }
 
+        extern volatile int global_tick;
+        if (hid->report_seen &&
+            global_tick - hid->last_debug_tick >= 100) {
+            hid->last_debug_tick = global_tick;
+            log_printf("[HIDHB] dev=%u reports=%u last="
+                       "%X %X %X %X %X %X %X %X\n",
+                       hid->dev->address, hid->report_count,
+                       hid->prev_report[0], hid->prev_report[1],
+                       hid->prev_report[2], hid->prev_report[3],
+                       hid->prev_report[4], hid->prev_report[5],
+                       hid->prev_report[6], hid->prev_report[7]);
+        }
 
         /*
          * Drain up to 8 reports to keep pointer tracking smooth, but break
@@ -728,8 +740,20 @@ void usb_hid_poll(void)
 
             if (!hid->report_seen) {
                 hid->report_seen = 1;
-                log_printf("[HID  ] first report received from dev %u (%d bytes)\n",
-                           hid->dev->address, ret);
+                log_printf("[HID  ] first report from dev %u (%d bytes): "
+                           "%X %X %X %X %X %X %X %X\n",
+                           hid->dev->address, ret,
+                           report_buf[0], report_buf[1], report_buf[2],
+                           report_buf[3], report_buf[4], report_buf[5],
+                           report_buf[6], report_buf[7]);
+            }
+            if (hid->report_count <= 12) {
+                log_printf("[HIDRX] n=%u len=%d raw="
+                           "%X %X %X %X %X %X %X %X\n",
+                           hid->report_count, ret,
+                           report_buf[0], report_buf[1], report_buf[2],
+                           report_buf[3], report_buf[4], report_buf[5],
+                           report_buf[6], report_buf[7]);
             }
 
             int curr_btn = hid_mouse_buttons(hid, report_buf, ret);
@@ -737,6 +761,26 @@ void usb_hid_poll(void)
                 hid, hid->prev_report, hid->report_len
             );
             int button_edge = (curr_btn != prev_btn);
+            int raw_button_changed =
+                report_buf[0] != hid->prev_report[0] ||
+                report_buf[1] != hid->prev_report[1] ||
+                (ret > 6 &&
+                 (report_buf[6] != hid->prev_report[6] ||
+                  report_buf[7] != hid->prev_report[7]));
+
+            if (hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
+                hid->dev->product == HID_VMWARE_MOUSE_PID &&
+                (button_edge || raw_button_changed ||
+                 ret != hid->report_len) &&
+                hid->button_reports_logged < 64) {
+                hid->button_reports_logged++;
+                log_printf("[HIDBTN] tick=%d len=%d btn=%d prev=%d raw="
+                           "%X %X %X %X %X %X %X %X\n",
+                           global_tick, ret, curr_btn, prev_btn,
+                           report_buf[0], report_buf[1], report_buf[2],
+                           report_buf[3], report_buf[4], report_buf[5],
+                           report_buf[6], report_buf[7]);
+            }
 
             if (hid->type == HID_TYPE_KEYBOARD && ret >= 8) {
                 process_keyboard_report(hid, report_buf);
