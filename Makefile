@@ -41,6 +41,11 @@ C_SOURCES = kernel/kernel.c \
             drivers/speaker.c \
             drivers/mouse.c \
             drivers/keyboard.c \
+            drivers/usb_core.c \
+            drivers/usb_ehci.c \
+            drivers/usb_uhci.c \
+            drivers/usb_hub.c \
+            drivers/usb_hid.c \
             drivers/disk.c \
             drivers/blkdev.c \
             drivers/isadma.c \

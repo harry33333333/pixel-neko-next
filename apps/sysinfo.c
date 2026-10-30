@@ -9,6 +9,8 @@
 #include "audio.h"
 #include "version.h"
 #include "pci.h"
+#include "usb_core.h"
+#include "usb_hid.h"
 
 static int active_tab = 0; // 0: System, 1: PCI Bus, 2: Drives
 static int pci_page = 0;
@@ -312,6 +314,11 @@ void sysinfo_draw(unsigned char* v, int wx, int wy, int ww, int wh) {
         } else {
             draw_text_fitted(v, value_x, ly, max_value_chars, "Disabled", 8);
         }
+
+        ly += 16;
+        font_draw_text(v, lx, ly, "USB Host:", 0);
+        draw_text_fitted(v, value_x, ly, max_value_chars,
+                         usb_host_controller_summary(), 2);
 
     } else if (active_tab == 1) {
         // Tab 1: PCI Devices (6 items per page)

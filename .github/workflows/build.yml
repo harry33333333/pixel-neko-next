@@ -2,9 +2,9 @@ name: Build and Release OS ISO
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "beta" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "beta" ]
   workflow_dispatch:
 
 permissions:
@@ -60,7 +60,7 @@ jobs:
         if-no-files-found: error
 
     - name: Publish GitHub Release
-      if: github.ref == 'refs/heads/main'
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/beta'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ env.TAG_NAME }}
@@ -84,6 +84,7 @@ jobs:
           - Unified PCI/BAR, IRQ, DMA, MMIO, physical-memory, driver-registration and error-fallback platform layers.
           - VFS with Windows-style drive letters, FAT12/16/32, ISO9660/Joliet, MBR partitions, ATA/ATAPI storage and native floppy support.
           - Integrated file manager, editor, media player, image viewer, control panel, system information, calculator, puzzle and installer applications.
+          - Native USB 2.0 EHCI and USB 1.1 UHCI host controllers, Rate Matching Hub (RMH) and Transaction Translator (TT) support, and FreeBSD-derived USB HID keyboard and mouse drivers with responsive single/double click handling.
           - Retro boot animation, PS/2 keyboard and mouse input with latched button edges and reliable double-click handling, staged power management, serial diagnostics and graphical crash recovery.
           - Reproducible Makefile builds and GitHub Actions release automation for bootable ISO and source archives.
         draft: false

@@ -14,6 +14,7 @@
 #include "irq.h"
 #include "log.h"
 #include "version.h"
+#include "usb_core.h"
 
 int screen_w = 320;
 int screen_h = 200;
@@ -589,12 +590,15 @@ void kernel_main(void)
     log_printf("[IRQ ] active timer/keyboard/mouse, IF=%u\n",
                (unsigned int)irq_interrupts_enabled());
 
+    usb_init();
+
     mouse_get(&mx, &my, &mb);
     int hardware_cursor = gfx_accel_has_hardware_cursor();
     if (hardware_cursor) gfx_accel_set_cursor(mx, my, 1);
 
     while (1) {
         audio_poll();
+        usb_poll();
         timer_update();
         check_revert_timer();
         hardware_cursor = gfx_accel_has_hardware_cursor();
@@ -627,7 +631,9 @@ void kernel_main(void)
                       events[i].pressed, events[i].released);
         }
         wm_set_input_event_tick(-1);
-        wm_update(v, mx, my, mb, 0, 0);
+        if (event_count == 0) {
+            wm_update(v, mx, my, mb, 0, 0);
+        }
         int new_mr = wm_need_mouse_reset();
         if (new_mr) {
             mr = 1;

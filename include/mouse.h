@@ -22,4 +22,8 @@ extern int mouse_speed;
 void mouse_set_speed(int s);
 int mouse_get_speed(void);
 
+void mouse_handle_usb_report(int buttons, int dx, int dy, int dz);
+void mouse_handle_usb_absolute(int buttons, int x, int y);
+void mouse_notify_usb_detached(void);
+
 #endif
