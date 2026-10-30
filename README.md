@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Architecture](https://img.shields.io/badge/Arch-x86--32-blue.svg)](https://en.wikipedia.org/wiki/IA-32)
 [![Boot](https://img.shields.io/badge/Boot-Multiboot%20%2F%20GRUB-green.svg)](https://www.gnu.org/software/grub/)
-[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.1696)-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-C2.0%20(Build%202012.2000)-brightgreen.svg)]()
 
 **Pixel Neko Next** 是一个轻量级、开箱即用的 x86-32 位原生微桌面操作系统（Bare-metal GUI OS）。系统完全基于 C 语言与 NASM 汇编从零编写，具备高分辨率图形桌面、完整的窗口管理器、Windows 驱动器盘符映射、ISO9660 光盘文件系统、FAT12/16/32 文件系统、原生软驱驱动、丰富的内置应用程序以及极致复古的经典开机与关机停机体验。
 
@@ -40,6 +40,48 @@
 
 ---
 
+## 🖱️ VMware USB 鼠标与键盘实现
+
+VMware 虚拟机的 USB 输入由原生 EHCI/UHCI、HID、PS/2 兼容层和 VMware
+VMMouse 回退共同负责。该实现当前位于 `beta` 分支，实体机测试完成前不会合并到
+`main`。
+
+### USB HID 键盘
+
+- 通过 EHCI 或 UHCI 枚举 HID 键盘，并读取设备、配置、接口、端点和 HID Report
+  Descriptor。
+- 键盘切换到标准 HID Boot Protocol，读取 8 字节报告中的修饰键和最多 6 个按键
+  usage。
+- HID usage 被转换为系统统一使用的 PS/2 Set 1 扫描码，再进入现有键盘缓冲和窗口
+  事件循环，因此物理 USB 键盘与 PS/2 键盘共享同一上层输入接口。
+- UHCI 周期 IN 端点采用 64 个预挂载 TD 的连续环形队列。控制器在主循环渲染期间
+  仍保持轮询，NAK 不会复制旧数据或错误翻转 DATA0/DATA1。
+
+### VMware USB 鼠标与点击修复
+
+- VMware `0E0F:0003` 虚拟鼠标通过 UHCI 全速端口枚举，Report Descriptor 提供绝对
+  X/Y 坐标和按钮字段。
+- 驱动解析描述符中的坐标位宽、逻辑范围、相对/绝对标志和按钮位，并将绝对坐标映射
+  到当前桌面分辨率。
+- 调试确认部分 VMware Workstation 版本只在中断报告和 `GET_REPORT(Input)` 中提供
+  坐标，按钮字段始终为零；这些版本还会以 `STALL` 拒绝 HID Boot Protocol。
+- 因此系统优先启用 VMware VMMouse hypervisor 通道。该通道直接提供绝对坐标以及
+  左、右、中键状态，按钮边沿继续进入统一鼠标事件队列，支持单击、双击和拖动。
+- VMMouse 不可用时自动回退到 USB HID Report Protocol；普通实体 USB 鼠标不会启用
+  VMware 专用路径。
+
+### 实体机与模拟器兼容策略
+
+- VMware 使用 EHCI + UHCI、VMMouse 和 HID 回退组合，VirtualBox 与 QEMU 继续使用
+  标准 EHCI/UHCI 和 HID/PS/2 路径。
+- Intel 5 系列实体主板（包括 ASUS P7H55-M LE 对应控制器）支持最多 4 个 UHCI
+  控制器和一个 EHCI 控制器。
+- BIOS 开启 Legacy USB Support 时，系统保留 BIOS 的 PS/2 键鼠模拟路径，避免重置
+  仍由固件管理的 USB 控制器；关闭 Legacy USB 后，系统接管原生 EHCI/UHCI。
+- 实体机上的 USB 键鼠尚未完成充分回归测试，因此 `beta` 暂不合并到 `main`。
+
+---
+
 ## 📁 项目目录结构
 
 ```text
@@ -67,6 +109,12 @@
 │   ├── font.c            # 基础字体渲染
 │   ├── keyboard.c        # PS/2 键盘与按键缓冲
 │   ├── mouse.c           # PS/2 鼠标驱动与超时保护
+│   ├── usb_core.c        # USB 设备枚举、描述符和 HID 分发
+│   ├── usb_ehci.c        # USB 2.0 EHCI 主机控制器与周期传输
+│   ├── usb_uhci.c        # USB 1.1 UHCI 主机控制器与连续 TD 队列
+│   ├── usb_hid.c         # USB HID 键盘、鼠标和报告解析
+│   ├── usb_hub.c         # USB Hub / Root Hub 支持
+│   ├── vmware_mouse.c    # VMware VMMouse 绝对指针与按钮兼容层
 │   └── speaker.c         # PC 扬声器驱动与复古开机和弦
 ├── fs/                   # 文件系统实现
 │   ├── fat.c             # FAT12 / FAT16 / FAT32 文件系统与空闲簇统计
@@ -109,7 +157,7 @@
    ```bash
    make
    ```
-   编译完成后会在根目录生成 `pixel_neko_build_1700.000.iso`。
+   编译完成后会在根目录生成 `pixel_neko_build_2012.2000.iso`。
 
 2. **在 QEMU 虚拟机中一键运行**
    ```bash
@@ -132,7 +180,7 @@
 - **多显卡显示与 2D 后端**：支持标准 VBE、VMware SVGA II、ATI Mach64/3D Rage II+ 与 NVIDIA G7x PCIe 显示设备；提供分辨率、色深、Pitch、显存探测、硬件 2D 或线性 Framebuffer 以及安全软件回退。
 - **高分辨率与多色深**：支持从经典低分辨率到 1280×1024 的多种显示模式，并在硬件或 VBE 能力允许时提供 8/16/24/32 位输出。
 - **多平台音频支持**：支持 Intel/VMware HDAudio、VIA VT1708S、Ensoniq ES1371/CT4810、CMI8738/C3DX 与标准 AC'97 混音和输出路径，兼容 44.1kHz 与 48kHz PCM 播放。
-- **统一输入与桌面交互**：使用 PIT、PIC、PS/2 键鼠与中断派发提供键盘输入、流畅鼠标移动、按键边沿锁存、可靠双击、窗口拖动、缩放和桌面操作。
+- **统一输入与桌面交互**：支持 USB HID、EHCI、UHCI、PS/2 与 VMware VMMouse 键鼠输入，提供按键边沿锁存、可靠单击/双击、窗口拖动、缩放和桌面操作。
 - **存储与文件系统**：提供 VFS、Windows 风格盘符、FAT12/FAT16/FAT32、ISO9660/Joliet、MBR 分区、ATA/ATAPI 光硬盘与原生软驱支持。
 - **完整内置应用**：包含文件管理器、文本编辑器、音乐播放器、图片查看器、控制面板、系统信息、计算器、拼图、安装器等桌面程序。
 - **启动、电源与诊断能力**：提供复古启动动画、分级重启与关机、ACPI/APM 电源处理、串口日志、PCI 设备查看以及图形化异常/崩溃视窗。
