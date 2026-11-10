@@ -45,4 +45,14 @@ unsigned char pci_find_capability(const pci_device_t* dev,
                                   unsigned char capability);
 const char* pci_class_name(unsigned char class_code, unsigned char subclass);
 
+static inline int pci_bar_is_valid(const pci_device_t* dev, int index) {
+    return dev && index >= 0 && index < PCI_BAR_COUNT && dev->bar_valid[index];
+}
+static inline int pci_bar_is_io(const pci_device_t* dev, int index) {
+    return dev && index >= 0 && index < PCI_BAR_COUNT && dev->bar_is_io[index];
+}
+static inline unsigned int pci_bar_address(const pci_device_t* dev, int index) {
+    return (dev && index >= 0 && index < PCI_BAR_COUNT) ? dev->bar[index] : 0;
+}
+
 #endif

@@ -66,3 +66,15 @@ int dma_is_valid(const dma_buffer_t* buffer)
     return buffer && buffer->owned && buffer->virt &&
            buffer->phys == (unsigned int)buffer->virt && buffer->bytes != 0;
 }
+
+void dma_sync_for_cpu(dma_buffer_t* buffer)
+{
+    (void)buffer;
+    mmio_barrier();
+}
+
+void dma_sync_for_device(dma_buffer_t* buffer)
+{
+    (void)buffer;
+    __asm__ volatile("lock; addl $0, 0(%%esp)" ::: "memory");
+}

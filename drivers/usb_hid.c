@@ -1,961 +1,978 @@
-/*
- * Pixel Neko Next - USB HID Subsystem (Keyboard and Mouse)
- *
- * Derived from FreeBSD sys/dev/usb/input/ukbd.c, ums.c and usb_hid.c
- * Copyright (c) 2008 Hans Petter Selasky <hselasky@FreeBSD.org>
- * Copyright (c) 1998, 2004 Lennart Augustsson <lennart@augustsson.net>
- * Copyright (c) 2026 Pixel Neko Project
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
-
 #include "usb_hid.h"
-#include "usb_core.h"
-#include "keyboard.h"
 #include "mouse.h"
+#include "keyboard.h"
 #include "log.h"
+#include "string.h"
 #include "wm.h"
-#include "vmware_mouse.h"
 
-#define HID_MAX_DEVICES 8
-
-#define HID_TYPE_UNKNOWN  0
-#define HID_TYPE_KEYBOARD 1
-#define HID_TYPE_MOUSE    2
-
-#define HID_VMWARE_VENDOR_ID   0x0E0FU
-#define HID_VMWARE_MOUSE_PID   0x0003U
-
-#define HID_REQ_GET_REPORT     0x01U
-#define HID_REQ_SET_IDLE       0x0AU
-#define HID_REPORT_INPUT       0x01U
-
-#define HID_LOCAL_USAGE_MAX 32
+#define HID_MAX_REPORT_IDS 8
+#define HID_MAX_LOCAL_USAGES 16
+#define HID_MAX_KEYS 16
+#define HID_REPORT_MAX_BYTES 64
 
 typedef struct {
-    int valid;
-    int report_id;
-    int x_bit;
-    int x_size;
-    int x_min;
-    int x_max;
-    int x_relative;
-    int y_bit;
-    int y_size;
-    int y_min;
-    int y_max;
-    int y_relative;
-    int button_bit;
-    int button_size;
-    int button_count;
-} hid_mouse_layout_t;
+    bool used;
+    uint8_t report_id;
+    uint16_t bit_end;
+    uint16_t modifiers_offset;
+    uint8_t modifiers_count;
+    uint16_t keys_offset;
+    uint8_t keys_size;
+    uint8_t keys_count;
+    uint16_t buttons_offset;
+    uint8_t buttons_count;
+    uint16_t x_offset;
+    uint16_t y_offset;
+    uint16_t wheel_offset;
+    uint8_t x_size;
+    uint8_t y_size;
+    uint8_t wheel_size;
+    int32_t x_min;
+    int32_t x_max;
+    int32_t y_min;
+    int32_t y_max;
+    bool x_absolute;
+    bool y_absolute;
+} hid_report_layout_t;
 
 typedef struct {
-    usb_device_t*   dev;
-    usb_endpoint_t* ep;
-    int             type;
-    int             report_len;
-    int             report_seen;
-    int             button_reports_logged;
-    unsigned int    report_count;
-    int             last_debug_tick;
-    int             control_poll_enabled;
-    int             last_control_tick;
-    int             control_reports_logged;
-    int             vmware_boot_protocol;
-    int             hypervisor_mouse;
-    hid_mouse_layout_t mouse_layout;
-    unsigned char   prev_report[16];
-} hid_device_t;
+    bool keyboard;
+    bool mouse;
+    uint8_t report_count;
+    uint8_t report_length;
+    hid_report_layout_t reports[HID_MAX_REPORT_IDS];
+} hid_descriptor_t;
 
-static unsigned int hid_item_value(const unsigned char* data, int size)
-{
-    unsigned int value = 0;
+typedef struct {
+    bool used;
+    usb_device_t* device;
+    usb_endpoint_t* endpoint;
+    uint8_t interface_number;
+    bool keyboard;
+    bool mouse;
+    bool boot_keyboard;
+    uint8_t report_length;
+    uint32_t buttons;
+    bool caps_lock;
+    uint8_t previous_keys[HID_MAX_KEYS];
+    uint32_t previous_key_codes[HID_MAX_KEYS];
+    int32_t last_x;
+    int32_t last_y;
+    bool have_absolute_position;
+    uint32_t reports;
+    hid_descriptor_t descriptor;
+} hid_state_t;
+
+typedef struct {
+    uint32_t usage_page;
+    uint32_t report_size;
+    uint32_t report_count;
+    uint8_t report_id;
+    int32_t logical_min;
+    int32_t logical_max;
+} hid_global_state_t;
+
+typedef struct {
+    uint32_t usage_page;
+    uint32_t report_size;
+    uint32_t report_count;
+    uint8_t report_id;
+    int32_t logical_min;
+    int32_t logical_max;
+    uint32_t usages[HID_MAX_LOCAL_USAGES];
+    uint8_t usage_count;
+    uint32_t usage_min;
+    uint32_t usage_max;
+    bool has_usage_min;
+    bool has_usage_max;
+} hid_item_state_t;
+
+static hid_state_t g_hids[USB_HID_MAX_DEVICES];
+static int g_keyboards = 0;
+static int g_mice = 0;
+
+static void input_emit_key(uint32_t code, bool pressed) {
+    if (pressed && code) {
+        keyboard_push_key((int)code);
+    }
+}
+
+static void input_emit_mouse_move(int32_t dx, int32_t dy,
+                                  uint32_t buttons, int32_t wheel) {
+    mouse_handle_usb_report((int)buttons, (int)dx, (int)dy, (int)wheel);
+}
+
+static void input_emit_mouse_abs(int32_t abs_x, int32_t abs_y,
+                                 int32_t dx, int32_t dy,
+                                 uint32_t buttons, int32_t wheel) {
+    (void)dx; (void)dy; (void)wheel;
+    mouse_handle_usb_absolute((int)buttons, (int)abs_x, (int)abs_y);
+}
+
+static void input_emit_mouse_button(uint32_t buttons) {
+    int x = 0, y = 0;
+    mouse_get(&x, &y, 0);
+    mouse_handle_usb_absolute((int)buttons, x, y);
+}
+
+static uint32_t hid_item_value(const uint8_t* data, int size) {
+    uint32_t value = 0;
     for (int i = 0; i < size; i++) {
-        value |= (unsigned int)data[i] << (i * 8);
+        value |= (uint32_t)data[i] << (8 * i);
     }
     return value;
 }
 
-static int hid_item_signed_value(const unsigned char* data, int size)
-{
-    unsigned int value = hid_item_value(data, size);
-    if (size == 1 && (value & 0x80U)) return (int)(value | 0xFFFFFF00U);
-    if (size == 2 && (value & 0x8000U)) return (int)(value | 0xFFFF0000U);
-    return (int)value;
+static int32_t hid_item_signed_value(const uint8_t* data, int size) {
+    if (size <= 0) return 0;
+    uint32_t value = hid_item_value(data, size);
+    if (size < 4 && (value & (1u << (size * 8 - 1)))) {
+        value |= UINT32_MAX << (size * 8);
+    }
+    return (int32_t)value;
 }
 
-static void hid_add_usage(unsigned short* usages, unsigned short* pages,
-                          int* count, unsigned int page, unsigned int usage)
-{
-    if (*count >= HID_LOCAL_USAGE_MAX) return;
-    pages[*count] = (unsigned short)page;
-    usages[*count] = (unsigned short)usage;
-    (*count)++;
+static uint32_t hid_full_usage(uint32_t page, uint32_t usage, int size) {
+    if (size == 4 && (usage >> 16)) return usage;
+    return (page << 16) | (usage & 0xFFFFu);
 }
 
-static void hid_parse_mouse_layout(const unsigned char* desc, int len,
-                                   hid_mouse_layout_t* layout)
-{
-    unsigned int usage_page = 0;
-    unsigned int report_size = 0;
-    unsigned int report_count = 0;
-    unsigned int report_id = 0;
-    int logical_min = 0;
-    int logical_max = 0;
-    int report_bit = 0;
+static hid_report_layout_t* report_layout_for_id(hid_descriptor_t* descriptor,
+                                                 uint8_t report_id) {
+    for (uint8_t i = 0; i < descriptor->report_count; i++) {
+        if (descriptor->reports[i].used &&
+            descriptor->reports[i].report_id == report_id) {
+            return &descriptor->reports[i];
+        }
+    }
+    if (descriptor->report_count >= HID_MAX_REPORT_IDS) return NULL;
+    hid_report_layout_t* layout =
+        &descriptor->reports[descriptor->report_count++];
+    memset(layout, 0, sizeof(*layout));
+    layout->used = true;
+    layout->report_id = report_id;
+    return layout;
+}
 
-    unsigned short usages[HID_LOCAL_USAGE_MAX];
-    unsigned short pages[HID_LOCAL_USAGE_MAX];
-    int usage_count = 0;
-    unsigned int usage_min = 0;
-    unsigned int usage_max = 0;
-    unsigned int usage_min_page = 0;
-    unsigned int usage_max_page = 0;
-    int has_usage_range = 0;
+static void record_input_field(hid_descriptor_t* descriptor,
+                               hid_report_layout_t* layout,
+                               const hid_item_state_t* state,
+                               bool absolute) {
+    uint32_t count = state->report_count;
+    uint32_t size = state->report_size;
+    if (!count || !size) return;
+    if (count > 512u) count = 512u;
+    if (size > 32u) size = 32u;
 
-    usb_memset(layout, 0, sizeof(*layout));
+    uint16_t field_start = layout->bit_end;
+    for (uint32_t field = 0; field < count; field++) {
+        uint32_t field_offset = (uint32_t)field_start + field * size;
+        if (field_offset > UINT16_MAX) return;
+        uint32_t usage = 0;
+        if (field < state->usage_count) {
+            usage = state->usages[field];
+        } else if (state->has_usage_min && state->has_usage_max) {
+            uint32_t raw_min = state->usage_min;
+            uint32_t raw_max = state->usage_max;
+            if (raw_min + field <= raw_max) {
+                usage = hid_full_usage(state->usage_page,
+                                       (raw_min & 0xFFFFu) + field, 2);
+            }
+        } else if (state->usage_count) {
+            usage = state->usages[state->usage_count - 1];
+        }
+
+        uint32_t page = usage >> 16;
+        uint32_t code = usage & 0xFFFFu;
+        if (page == 0x0001u) {
+            if (code == 0x01u || code == 0x02u) descriptor->mouse = true;
+            if (code == 0x06u) descriptor->keyboard = true;
+            if (code == 0x30u) {
+                layout->x_offset = (uint16_t)field_offset;
+                layout->x_size = (uint8_t)size;
+                layout->x_min = state->logical_min;
+                layout->x_max = state->logical_max;
+                layout->x_absolute = absolute;
+                descriptor->mouse = true;
+            } else if (code == 0x31u) {
+                layout->y_offset = (uint16_t)field_offset;
+                layout->y_size = (uint8_t)size;
+                layout->y_min = state->logical_min;
+                layout->y_max = state->logical_max;
+                layout->y_absolute = absolute;
+                descriptor->mouse = true;
+            } else if (code == 0x38u) {
+                layout->wheel_offset = (uint16_t)field_offset;
+                layout->wheel_size = (uint8_t)size;
+                descriptor->mouse = true;
+            }
+        } else if (page == 0x0009u) {
+            if (layout->buttons_count == 0 ||
+                (uint16_t)field_offset < layout->buttons_offset) {
+                layout->buttons_offset = (uint16_t)field_offset;
+            }
+            if (size == 1 && count <= 32u) {
+                layout->buttons_count = (uint8_t)count;
+            } else if (layout->buttons_count < 32) {
+                layout->buttons_count++;
+            }
+            descriptor->mouse = true;
+        } else if (page == 0x0007u) {
+            if (state->has_usage_min && (state->usage_min & 0xFFFFu) == 0xE0u) {
+                layout->modifiers_offset = (uint16_t)field_offset;
+                layout->modifiers_count = (uint8_t)(count > 255u ? 255u : count);
+                descriptor->keyboard = true;
+            } else {
+                if (layout->keys_count == 0 ||
+                    (uint16_t)field_offset < layout->keys_offset) {
+                    layout->keys_offset = (uint16_t)field_offset;
+                    layout->keys_size = (uint8_t)size;
+                    layout->keys_count = (uint8_t)(count > 255u ? 255u : count);
+                }
+                descriptor->keyboard = true;
+            }
+        }
+    }
+    uint32_t total_bits = (uint32_t)field_start + count * size;
+    layout->bit_end = total_bits > UINT16_MAX ? UINT16_MAX : (uint16_t)total_bits;
+}
+
+static void parse_report_descriptor(const uint8_t* desc, int length,
+                                    hid_descriptor_t* descriptor) {
+    memset(descriptor, 0, sizeof(*descriptor));
+    hid_global_state_t global;
+    hid_item_state_t state;
+    memset(&global, 0, sizeof(global));
+    memset(&state, 0, sizeof(state));
+
     int offset = 0;
-    while (offset < len) {
-        unsigned char prefix = desc[offset++];
-        if (prefix == 0xFEU) {
-            if (offset + 2 > len) break;
-            int long_size = desc[offset++];
-            offset++;
-            if (long_size < 0 || offset + long_size > len) break;
-            offset += long_size;
+    while (offset < length) {
+        uint8_t prefix = desc[offset++];
+        if (prefix == 0xFEu) { /* Long item */
+            if (offset + 2 > length) break;
+            uint8_t data_size = desc[offset];
+            offset += 2 + data_size;
             continue;
         }
 
-        int size = prefix & 3;
-        if (size == 3) size = 4;
-        if (offset + size > len) break;
-        const unsigned char* data = &desc[offset];
-        unsigned int value = hid_item_value(data, size);
-        int type = (prefix >> 2) & 3;
-        int tag = (prefix >> 4) & 0x0F;
-        offset += size;
+        uint8_t bSize = prefix & 0x03u;
+        uint8_t bType = (prefix >> 2) & 0x03u;
+        uint8_t bTag = (prefix >> 4) & 0x0Fu;
+        int data_bytes = bSize == 3 ? 4 : bSize;
+        if (offset + data_bytes > length) break;
+        const uint8_t* data = desc + offset;
+        offset += data_bytes;
 
-        if (type == 1) {
-            if (tag == 0) usage_page = value;
-            else if (tag == 1) logical_min = hid_item_signed_value(data, size);
-            else if (tag == 2) logical_max = hid_item_signed_value(data, size);
-            else if (tag == 7) report_size = value;
-            else if (tag == 8) {
-                report_id = value;
-                report_bit = 0;
-            } else if (tag == 9) {
-                report_count = value;
-            }
-        } else if (type == 2) {
-            unsigned int page = usage_page;
-            unsigned int usage = value;
-            if (size == 4) {
-                page = value >> 16;
-                usage = value & 0xFFFFU;
-            }
-            if (tag == 0) {
-                hid_add_usage(usages, pages, &usage_count, page, usage);
-            } else if (tag == 1) {
-                usage_min = usage;
-                usage_min_page = page;
-                has_usage_range = 1;
-            } else if (tag == 2) {
-                usage_max = usage;
-                usage_max_page = page;
-            }
-        } else if (type == 0) {
-            if (tag == 8 && report_size > 0 && report_count > 0) {
-                unsigned int flags = value;
-                int constant = (flags & 1U) != 0;
-                int variable = (flags & 2U) != 0;
-                for (unsigned int field = 0; field < report_count; field++) {
-                    unsigned int page = usage_page;
-                    unsigned int usage = 0;
-                    if (usage_count > 0) {
-                        int index = (field < (unsigned int)usage_count) ?
-                                    (int)field : usage_count - 1;
-                        page = pages[index];
-                        usage = usages[index];
-                    } else if (has_usage_range) {
-                        page = usage_min_page;
-                        usage = usage_min + field;
-                        if (usage_max_page == usage_min_page &&
-                            usage > usage_max) {
-                            usage = usage_max;
+        if (bType == 0) { /* Main */
+            switch (bTag) {
+                case 8: { /* Input */
+                    uint32_t flags = hid_item_value(data, data_bytes);
+                    bool constant = (flags & (1u << 0)) != 0;
+                    bool variable = (flags & (1u << 1)) != 0;
+                    bool relative = (flags & (1u << 2)) != 0;
+                    hid_report_layout_t* layout =
+                        report_layout_for_id(descriptor, state.report_id);
+                    if (layout) {
+                        if (!constant) {
+                            record_input_field(descriptor, layout, &state,
+                                               !relative);
+                        } else {
+                            uint32_t advance = (uint32_t)state.report_count *
+                                               state.report_size;
+                            uint32_t total = (uint32_t)layout->bit_end + advance;
+                            layout->bit_end = total > UINT16_MAX
+                                                  ? UINT16_MAX
+                                                  : (uint16_t)total;
                         }
                     }
-
-                    if (!constant && variable) {
-                        if (page == 0x01U && usage == 0x30U &&
-                            !layout->x_size) {
-                            layout->report_id = (int)report_id;
-                            layout->x_bit = report_bit;
-                            layout->x_size = (int)report_size;
-                            layout->x_min = logical_min;
-                            layout->x_max = logical_max;
-                            layout->x_relative = (flags & 4U) != 0;
-                        } else if (page == 0x01U && usage == 0x31U &&
-                                   !layout->y_size) {
-                            if (!layout->x_size) {
-                                layout->report_id = (int)report_id;
-                            }
-                            layout->y_bit = report_bit;
-                            layout->y_size = (int)report_size;
-                            layout->y_min = logical_min;
-                            layout->y_max = logical_max;
-                            layout->y_relative = (flags & 4U) != 0;
-                        } else if (page == 0x09U && usage >= 1U &&
-                                   usage <= 8U) {
-                            if (!layout->button_size) {
-                                layout->button_bit = report_bit;
-                                layout->button_size = (int)report_size;
-                            }
-                            layout->button_count++;
-                        }
-                    }
-                    report_bit += (int)report_size;
+                    /* Local items reset after each Main item */
+                    state.usage_count = 0;
+                    state.has_usage_min = false;
+                    state.has_usage_max = false;
+                    break;
                 }
+                case 9:  /* Output */
+                case 11: /* Feature */
+                    state.usage_count = 0;
+                    state.has_usage_min = false;
+                    state.has_usage_max = false;
+                    break;
+                case 10: /* End Collection */
+                    break;
+                default:
+                    break;
             }
-            usage_count = 0;
-            usage_min = 0;
-            usage_max = 0;
-            has_usage_range = 0;
+        } else if (bType == 1) { /* Global */
+            switch (bTag) {
+                case 0: /* Usage Page */
+                    global.usage_page = hid_item_value(data, data_bytes);
+                    state.usage_page = global.usage_page;
+                    break;
+                case 1: /* Logical Minimum */
+                    global.logical_min =
+                        hid_item_signed_value(data, data_bytes);
+                    state.logical_min = global.logical_min;
+                    break;
+                case 2: /* Logical Maximum */
+                    global.logical_max =
+                        hid_item_signed_value(data, data_bytes);
+                    state.logical_max = global.logical_max;
+                    break;
+                case 7: /* Report Size */
+                    global.report_size = hid_item_value(data, data_bytes);
+                    state.report_size = global.report_size;
+                    break;
+                case 8: /* Report ID */
+                    global.report_id = (uint8_t)hid_item_value(data, data_bytes);
+                    state.report_id = global.report_id;
+                    break;
+                case 9: /* Report Count */
+                    global.report_count = hid_item_value(data, data_bytes);
+                    state.report_count = global.report_count;
+                    break;
+                default:
+                    break;
+            }
+        } else if (bType == 2) { /* Local */
+            switch (bTag) {
+                case 0: /* Usage */
+                    if (state.usage_count < HID_MAX_LOCAL_USAGES) {
+                        uint32_t raw = hid_item_value(data, data_bytes);
+                        state.usages[state.usage_count++] =
+                            hid_full_usage(state.usage_page, raw, data_bytes);
+                    }
+                    break;
+                case 1: /* Usage Minimum */
+                    state.usage_min = hid_full_usage(
+                        state.usage_page, hid_item_value(data, data_bytes),
+                        data_bytes);
+                    state.has_usage_min = true;
+                    break;
+                case 2: /* Usage Maximum */
+                    state.usage_max = hid_full_usage(
+                        state.usage_page, hid_item_value(data, data_bytes),
+                        data_bytes);
+                    state.has_usage_max = true;
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
-    layout->valid = layout->x_size > 0 && layout->y_size > 0 &&
-                    layout->x_size <= 32 && layout->y_size <= 32;
+    uint16_t max_bits = 0;
+    for (uint8_t i = 0; i < descriptor->report_count; i++) {
+        if (descriptor->reports[i].used &&
+            descriptor->reports[i].bit_end > max_bits) {
+            max_bits = descriptor->reports[i].bit_end;
+        }
+    }
+    uint8_t bytes = (uint8_t)((max_bits + 7u) / 8u);
+    if (bytes == 0) bytes = 8;
+    if (descriptor->report_count > 1 ||
+        (descriptor->report_count == 1 && descriptor->reports[0].report_id)) {
+        bytes++; /* Prefix report ID byte */
+    }
+    descriptor->report_length = bytes;
 }
 
-static unsigned int hid_extract_bits(const unsigned char* report, int len,
-                                     int bit_offset, int size)
-{
-    unsigned int value = 0;
-    if (bit_offset < 0 || size <= 0 || size > 32) return 0;
-    for (int bit = 0; bit < size; bit++) {
-        int source_bit = bit_offset + bit;
-        int byte = source_bit >> 3;
-        if (byte >= len) break;
-        value |= ((report[byte] >> (source_bit & 7)) & 1U) << bit;
+static bool report_descriptor_has_wheel(const uint8_t* desc, int length) {
+    int offset = 0;
+    uint32_t page = 0;
+    while (offset < length) {
+        uint8_t prefix = desc[offset++];
+        if (prefix == 0xFEu) {
+            if (offset + 2 > length) break;
+            offset += 2 + desc[offset];
+            continue;
+        }
+        uint8_t bSize = prefix & 0x03u;
+        uint8_t bType = (prefix >> 2) & 0x03u;
+        uint8_t bTag = (prefix >> 4) & 0x0Fu;
+        int data_bytes = bSize == 3 ? 4 : bSize;
+        if (offset + data_bytes > length) break;
+        const uint8_t* data = desc + offset;
+        offset += data_bytes;
+
+        if (bType == 1 && bTag == 0) {
+            page = hid_item_value(data, data_bytes);
+        } else if (bType == 2 && bTag == 0) {
+            uint32_t usage = hid_item_value(data, data_bytes);
+            if (page == 0x0001u && (usage & 0xFFFFu) == 0x38u) return true;
+        }
+    }
+    return false;
+}
+
+static hid_report_layout_t* layout_for_report(hid_state_t* hid,
+                                              const uint8_t* report,
+                                              int length, int* payload_offset) {
+    if (!hid || !report || length <= 0) return NULL;
+    if (hid->descriptor.report_count == 0) return NULL;
+
+    bool has_report_ids =
+        hid->descriptor.report_count > 1 ||
+        (hid->descriptor.report_count == 1 &&
+         hid->descriptor.reports[0].report_id != 0);
+
+    uint8_t target_id = has_report_ids ? report[0] : 0;
+    if (payload_offset) *payload_offset = has_report_ids ? 1 : 0;
+
+    for (uint8_t i = 0; i < hid->descriptor.report_count; i++) {
+        if (hid->descriptor.reports[i].used &&
+            hid->descriptor.reports[i].report_id == target_id) {
+            return &hid->descriptor.reports[i];
+        }
+    }
+    return &hid->descriptor.reports[0];
+}
+
+static uint32_t hid_usage_to_ascii(uint8_t usage, bool shift, bool caps) {
+    if (usage >= 0x04 && usage <= 0x1D) {
+        char value = (char)('a' + usage - 0x04);
+        return (shift ^ caps) ? (uint32_t)(value - 32) : (uint32_t)value;
+    }
+    if (usage >= 0x1E && usage <= 0x27) {
+        static const char digits[] = "1234567890";
+        static const char shifted[] = "!@#$%^&*()";
+        return shift ? (uint8_t)shifted[usage - 0x1E]
+                     : (uint8_t)digits[usage - 0x1E];
+    }
+    switch (usage) {
+        case 0x28: return '\n';
+        case 0x29: return 27;
+        case 0x2A: return '\b';
+        case 0x2B: return '\t';
+        case 0x2C: return ' ';
+        case 0x2D: return shift ? '_' : '-';
+        case 0x2E: return shift ? '+' : '=';
+        case 0x2F: return shift ? '{' : '[';
+        case 0x30: return shift ? '}' : ']';
+        case 0x31: return shift ? '|' : '\\';
+        case 0x33: return shift ? ':' : ';';
+        case 0x34: return shift ? '"' : '\'';
+        case 0x35: return shift ? '~' : '`';
+        case 0x36: return shift ? '<' : ',';
+        case 0x37: return shift ? '>' : '.';
+        case 0x38: return shift ? '?' : '/';
+        case 0x4F: return 203; /* RIGHT */
+        case 0x50: return 202; /* LEFT */
+        case 0x51: return 201; /* DOWN */
+        case 0x52: return 200; /* UP */
+        case 0x4A: return 204; /* HOME */
+        case 0x4D: return 205; /* END */
+        case 0x4B: return 206; /* PAGE_UP */
+        case 0x4E: return 207; /* PAGE_DOWN */
+        case 0x4C: return 208; /* DELETE */
+        default: return 0;
+    }
+}
+
+static uint32_t read_report_bits(const uint8_t* report, int length,
+                                 uint16_t bit_offset, uint8_t size) {
+    if (!report || size == 0 || size > 32 ||
+        (uint32_t)bit_offset + size > (uint32_t)length * 8u) {
+        return 0;
+    }
+    uint32_t value = 0;
+    for (uint8_t bit = 0; bit < size; bit++) {
+        uint32_t source = (uint32_t)bit_offset + bit;
+        if (report[source / 8u] & (1u << (source & 7u))) {
+            value |= (1u << bit);
+        }
     }
     return value;
 }
 
-static int hid_signed_bits(unsigned int value, int size)
-{
-    if (size <= 0) return 0;
-    if (size >= 32) return (int)value;
-    unsigned int sign = 1U << (size - 1);
-    if (value & sign) {
-        value |= ~((1U << size) - 1U);
+static int32_t read_report_signed(const uint8_t* report, int length,
+                                  uint16_t bit_offset, uint8_t size) {
+    uint32_t raw = read_report_bits(report, length, bit_offset, size);
+    if (size == 0 || size >= 32) return (int32_t)raw;
+    if (raw & (1u << (size - 1))) {
+        raw |= UINT32_MAX << size;
     }
-    return (int)value;
+    return (int32_t)raw;
 }
 
-static int hid_mouse_buttons(const hid_device_t* hid,
-                             const unsigned char* report, int len)
-{
-    if (!report || len <= 0) return 0;
+static bool key_usage_present(const uint8_t* keys, int count, uint8_t usage) {
+    for (int i = 0; i < count; i++) {
+        if (keys[i] == usage) return true;
+    }
+    return false;
+}
 
-    if (hid && hid->dev &&
-        hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
-        hid->dev->product == HID_VMWARE_MOUSE_PID) {
-        return (len > 0) ? (report[0] & 0x07) : 0;
+static void process_keyboard(hid_state_t* hid, hid_report_layout_t* layout,
+                             const uint8_t* report, int length) {
+    uint32_t modifiers = 0;
+    if (layout->modifiers_count) {
+        modifiers = read_report_bits(
+            report, length, layout->modifiers_offset,
+            layout->modifiers_count > 32 ? 32 : layout->modifiers_count);
+    }
+    bool shift = (modifiers & 0x22u) != 0;
+    keyboard_set_ctrl((modifiers & 0x11u) != 0);
+
+    uint8_t current_keys[HID_MAX_KEYS];
+    uint32_t current_codes[HID_MAX_KEYS];
+    memset(current_keys, 0, sizeof(current_keys));
+    memset(current_codes, 0, sizeof(current_codes));
+    int key_count = 0;
+
+    for (uint8_t i = 0; i < layout->keys_count && key_count < HID_MAX_KEYS;
+         i++) {
+        uint32_t usage = read_report_bits(
+            report, length,
+            (uint16_t)(layout->keys_offset + (uint16_t)i * layout->keys_size),
+            layout->keys_size);
+        if (usage > 0xFFu) usage &= 0xFFu;
+        if (usage) current_keys[key_count++] = (uint8_t)usage;
     }
 
-    const hid_mouse_layout_t* layout = hid ? &hid->mouse_layout : (const hid_mouse_layout_t*)0;
-    int base_bit = 0;
-
-    if (layout && layout->valid && layout->report_id) {
-        if (len < 1 || report[0] != layout->report_id) return 0;
-        base_bit = 8;
+    int previous_count = 0;
+    while (previous_count < HID_MAX_KEYS &&
+           hid->previous_keys[previous_count]) {
+        previous_count++;
     }
-
-    if (layout && layout->valid && layout->button_count > 0 &&
-        layout->button_size > 0 && layout->button_size <= 8) {
-        int buttons = 0;
-        for (int i = 0; i < layout->button_count && i < 3; i++) {
-            int bit_offset = base_bit + layout->button_bit +
-                             i * layout->button_size;
-            if ((bit_offset + layout->button_size + 7) / 8 > len) break;
-            unsigned int bit = hid_extract_bits(
-                report, len, bit_offset, layout->button_size);
-            if (bit & 1U) buttons |= 1 << i;
+    for (int i = 0; i < previous_count; i++) {
+        uint8_t usage = hid->previous_keys[i];
+        if (!key_usage_present(current_keys, key_count, usage) &&
+            hid->previous_key_codes[i]) {
+            input_emit_key(hid->previous_key_codes[i], false);
         }
-        if (buttons) return buttons;
     }
 
-    int byte = (layout && layout->report_id) ? 1 : 0;
-    return (byte < len) ? (report[byte] & 0x07) : 0;
-}
-
-static hid_device_t g_hid_devices[HID_MAX_DEVICES];
-static int          g_hid_count = 0;
-static int          g_kbd_count = 0;
-static int          g_mouse_count = 0;
-static unsigned int g_active_ctrls = 0;
-
-static int hid_controller_flag(usb_hci_t* hci)
-{
-    if (!hci) return 0;
-    if (hci->kind == USB_HCI_KIND_EHCI) return USB_HID_CTRL_EHCI;
-    if (hci->kind == USB_HCI_KIND_UHCI) return USB_HID_CTRL_UHCI;
-    return 0;
-}
-
-static void hid_recompute_controllers(void)
-{
-    g_active_ctrls = 0;
-    for (int i = 0; i < g_hid_count; i++) {
-        g_active_ctrls |= hid_controller_flag(g_hid_devices[i].dev->hci);
+    for (int i = 0; i < key_count; i++) {
+        uint8_t usage = current_keys[i];
+        if (key_usage_present(hid->previous_keys, previous_count, usage)) {
+            continue;
+        }
+        if (usage == 0x39) hid->caps_lock = !hid->caps_lock;
+        uint32_t code = hid_usage_to_ascii(usage, shift, hid->caps_lock);
+        current_codes[i] = code;
+        if (code) {
+            log_printf("[USBHID] KEY_DOWN code=0x%x '%c'\n",
+                       code, (code >= 0x20 && code < 0x7F) ? (char)code : ' ');
+            input_emit_key(code, true);
+        }
     }
+
+    memset(hid->previous_keys, 0, sizeof(hid->previous_keys));
+    memset(hid->previous_key_codes, 0, sizeof(hid->previous_key_codes));
+    memcpy(hid->previous_keys, current_keys, (size_t)key_count);
+    memcpy(hid->previous_key_codes, current_codes,
+           sizeof(uint32_t) * (size_t)key_count);
 }
 
-/* USB HID usage to PS/2 Set 1 make code mapping (0 = none, high bit 0x80 = extended key) */
-static const unsigned char hid_to_ps2[256] = {
-    /* 0x00 - 0x03 */ 0, 0, 0, 0,
-    /* 0x04 - 0x07: a, b, c, d */ 0x1E, 0x30, 0x2E, 0x20,
-    /* 0x08 - 0x0B: e, f, g, h */ 0x12, 0x21, 0x22, 0x23,
-    /* 0x0C - 0x0F: i, j, k, l */ 0x17, 0x24, 0x25, 0x26,
-    /* 0x10 - 0x13: m, n, o, p */ 0x32, 0x31, 0x18, 0x19,
-    /* 0x14 - 0x17: q, r, s, t */ 0x10, 0x13, 0x1F, 0x14,
-    /* 0x18 - 0x1B: u, v, w, x */ 0x16, 0x2F, 0x11, 0x2D,
-    /* 0x1C - 0x1F: y, z, 1, 2 */ 0x15, 0x2C, 0x02, 0x03,
-    /* 0x20 - 0x23: 3, 4, 5, 6 */ 0x04, 0x05, 0x06, 0x07,
-    /* 0x24 - 0x27: 7, 8, 9, 0 */ 0x08, 0x09, 0x0A, 0x0B,
-    /* 0x28 - 0x2B: Return, Esc, Backspace, Tab */ 0x1C, 0x01, 0x0E, 0x0F,
-    /* 0x2C - 0x2F: Space, -, =, [ */ 0x39, 0x0C, 0x0D, 0x1A,
-    /* 0x30 - 0x33: ], \, non-us#, ; */ 0x1B, 0x2B, 0x2B, 0x27,
-    /* 0x34 - 0x37: ', `, ,, . */ 0x28, 0x29, 0x33, 0x34,
-    /* 0x38 - 0x39: /, CapsLock */ 0x35, 0x3A,
-    /* 0x3A - 0x45: F1 - F12 */ 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, 0x57, 0x58,
-    /* 0x46 - 0x48: PrintScreen, ScrollLock, Pause */ 0, 0x46, 0,
-    /* 0x49 - 0x4B: Insert, Home, PageUp (extended) */ 0xD2, 0xC7, 0xC9,
-    /* 0x4C - 0x4E: Delete, End, PageDown (extended) */ 0xD3, 0xCF, 0xD1,
-    /* 0x4F - 0x53: Right, Left, Down, Up, NumLock */ 0xCD, 0xCB, 0xD0, 0xC8, 0x45,
-    /* 0x54 - 0x57: Keypad /, *, -, + */ 0xB5, 0x37, 0x4A, 0x4E,
-    /* 0x58 - 0x5B: Keypad Enter, 1, 2, 3 */ 0x9C, 0x4F, 0x50, 0x51,
-    /* 0x5C - 0x5F: Keypad 4, 5, 6, 7 */ 0x4B, 0x4C, 0x4D, 0x47,
-    /* 0x60 - 0x63: Keypad 8, 9, 0, . */ 0x48, 0x49, 0x52, 0x53,
-};
+static int32_t clamp_i32(int32_t value, int32_t minimum, int32_t maximum) {
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
 
-static void dispatch_scancode(unsigned char code, int released)
-{
-    if (code & 0x80) {
-        /* Extended key */
-        unsigned char base = code & 0x7F;
-        keyboard_handle_byte(0xE0);
-        keyboard_handle_byte(released ? (base | 0x80) : base);
+static uint32_t g_last_combined_buttons = 0;
+
+static void process_mouse(hid_state_t* hid, hid_report_layout_t* layout,
+                          const uint8_t* report, int length) {
+    if (layout->buttons_count) {
+        hid->buttons = read_report_bits(
+            report, length, layout->buttons_offset,
+            layout->buttons_count > 32 ? 32 : layout->buttons_count);
+    }
+
+    uint32_t buttons = 0;
+    for (int i = 0; i < USB_HID_MAX_DEVICES; i++) {
+        if (g_hids[i].used && g_hids[i].mouse) {
+            buttons |= g_hids[i].buttons;
+        }
+    }
+
+    int32_t x = 0;
+    int32_t y = 0;
+    int32_t wheel = 0;
+    if (layout->x_size) {
+        x = (layout->x_absolute && layout->x_min >= 0)
+                ? (int32_t)read_report_bits(report, length, layout->x_offset,
+                                            layout->x_size)
+                : read_report_signed(report, length, layout->x_offset,
+                                     layout->x_size);
+    }
+    if (layout->y_size) {
+        y = (layout->y_absolute && layout->y_min >= 0)
+                ? (int32_t)read_report_bits(report, length, layout->y_offset,
+                                            layout->y_size)
+                : read_report_signed(report, length, layout->y_offset,
+                                     layout->y_size);
+    }
+    if (layout->wheel_size) {
+        wheel = -read_report_signed(report, length, layout->wheel_offset,
+                                    layout->wheel_size);
+    }
+
+    if (layout->x_absolute || layout->y_absolute) {
+        int32_t sw = screen_w > 0 ? screen_w : 1024;
+        int32_t sh = screen_h > 0 ? screen_h : 768;
+        int32_t abs_x = hid->have_absolute_position ? hid->last_x : (sw / 2);
+        int32_t abs_y = hid->have_absolute_position ? hid->last_y : (sh / 2);
+
+        if (layout->x_absolute) {
+            int32_t xmin = layout->x_min;
+            int32_t xmax = layout->x_max > xmin ? layout->x_max : 32767;
+            int32_t rx = clamp_i32(x, xmin, xmax);
+            uint32_t span = (uint32_t)(xmax - xmin);
+            if (span == 0) span = 1;
+            uint32_t num = (uint32_t)(rx - xmin) * (uint32_t)(sw - 1);
+            abs_x = (int32_t)(num / span);
+        } else {
+            abs_x = clamp_i32(abs_x + x, 0, sw - 1);
+        }
+
+        if (layout->y_absolute) {
+            int32_t ymin = layout->y_min;
+            int32_t ymax = layout->y_max > ymin ? layout->y_max : 32767;
+            int32_t ry = clamp_i32(y, ymin, ymax);
+            uint32_t span = (uint32_t)(ymax - ymin);
+            if (span == 0) span = 1;
+            uint32_t num = (uint32_t)(ry - ymin) * (uint32_t)(sh - 1);
+            abs_y = (int32_t)(num / span);
+        } else {
+            abs_y = clamp_i32(abs_y + y, 0, sh - 1);
+        }
+
+        abs_x = clamp_i32(abs_x, 0, sw - 1);
+        abs_y = clamp_i32(abs_y, 0, sh - 1);
+
+        int32_t dx = hid->have_absolute_position ? (abs_x - hid->last_x)
+                                                 : (abs_x - sw / 2);
+        int32_t dy = hid->have_absolute_position ? (abs_y - hid->last_y)
+                                                 : (abs_y - sh / 2);
+        if (!hid->have_absolute_position && dx == 0 && dy == 0) {
+            dx = 1;
+        }
+        hid->last_x = abs_x;
+        hid->last_y = abs_y;
+        hid->have_absolute_position = true;
+
+        if ((dx || dy) && hid->reports <= 8) {
+            log_printf("[USBHID] MOUSE dx=%d dy=%d buttons=%u\n",
+                       dx, dy, buttons);
+        }
+        input_emit_mouse_abs(abs_x, abs_y, dx, dy, buttons, wheel);
     } else {
-        keyboard_handle_byte(released ? (code | 0x80) : code);
+        /*
+         * Per USB HID Usage Tables 1.12 Section 4.1 & FreeBSD ums.c:
+         * USB HID relative X is positive right, Y is positive down (screen Y).
+         */
+        x = clamp_i32(x, -32767, 32767);
+        y = clamp_i32(y, -32767, 32767);
+        if ((x || y) && hid->reports <= 8) {
+            log_printf("[USBHID] MOUSE dx=%d dy=%d buttons=%u\n",
+                       x, y, buttons);
+        }
+        input_emit_mouse_move(x, y, buttons, wheel);
+    }
+
+    if (buttons != g_last_combined_buttons) {
+        if (hid->reports <= 8) {
+            log_printf("[USBHID] BUTTON buttons=%u\n", buttons);
+        }
+        input_emit_mouse_button(buttons);
+        g_last_combined_buttons = buttons;
     }
 }
 
-static void process_keyboard_report(hid_device_t* hid, const unsigned char* report)
-{
-    unsigned char old_mod = hid->prev_report[0];
-    unsigned char new_mod = report[0];
-
-    /* Check modifier changes */
-    const unsigned char mod_codes[8] = {
-        0x1D, /* LCtrl */
-        0x2A, /* LShift */
-        0x38, /* LAlt */
-        0xDB, /* LGUI (extended 0x5B) */
-        0x9D, /* RCtrl (extended 0x1D) */
-        0x36, /* RShift */
-        0xB8, /* RAlt (extended 0x38) */
-        0xDC  /* RGUI (extended 0x5C) */
-    };
-
-    for (int i = 0; i < 8; i++) {
-        int old_down = (old_mod >> i) & 1;
-        int new_down = (new_mod >> i) & 1;
-        if (old_down != new_down) {
-            dispatch_scancode(mod_codes[i], !new_down);
-        }
-    }
-
-    /* Check released keys (present in prev_report but missing in report) */
-    for (int i = 2; i < 8; i++) {
-        unsigned char usage = hid->prev_report[i];
-        if (usage == 0) continue;
-
-        int still_pressed = 0;
-        for (int j = 2; j < 8; j++) {
-            if (report[j] == usage) {
-                still_pressed = 1;
-                break;
-            }
-        }
-        if (!still_pressed) {
-            unsigned char code = hid_to_ps2[usage];
-            if (code) dispatch_scancode(code, 1);
-        }
-    }
-
-    /* Check pressed keys (present in report but missing in prev_report) */
-    for (int i = 2; i < 8; i++) {
-        unsigned char usage = report[i];
-        if (usage == 0) continue;
-
-        int was_pressed = 0;
-        for (int j = 2; j < 8; j++) {
-            if (hid->prev_report[j] == usage) {
-                was_pressed = 1;
-                break;
-            }
-        }
-        if (!was_pressed) {
-            unsigned char code = hid_to_ps2[usage];
-            if (code) dispatch_scancode(code, 0);
-        }
-    }
-
-    usb_memcpy(hid->prev_report, report, 8);
+static int hid_send_class_request(usb_device_t* device, uint8_t interface_num,
+                                  uint8_t request, uint16_t value,
+                                  void* data, int length, int direction) {
+    return usb_control_msg(
+        device, direction | USB_RT_CLASS | USB_RT_INTERFACE,
+        request, value, interface_num, data, length);
 }
 
-static void process_mouse_report(hid_device_t* hid, const unsigned char* report, int len)
-{
-    const hid_mouse_layout_t* layout = &hid->mouse_layout;
-    if (!layout->valid) {
-        int buttons = hid_mouse_buttons(hid, report, len);
-        signed char dx = (len >= 2) ? (signed char)report[1] : 0;
-        signed char dy = (len >= 3) ? (signed char)report[2] : 0;
-        signed char dz = (len >= 4) ? (signed char)report[3] : 0;
-        mouse_handle_usb_report(buttons, dx, dy, dz);
-        return;
-    }
-
-    int base_bit = 0;
-    if (layout->report_id) {
-        if (len < 1 || report[0] != layout->report_id) return;
-        base_bit = 8;
-    }
-
-    int buttons = hid_mouse_buttons(hid, report, len);
-
-    int need_x_bytes = (base_bit + layout->x_bit + layout->x_size + 7) / 8;
-    int need_y_bytes = (base_bit + layout->y_bit + layout->y_size + 7) / 8;
-
-    int current_x = 0;
-    int current_y = 0;
-    mouse_get(&current_x, &current_y, (int*)0);
-
-    /* If relative mouse: delta coordinates */
-    if (layout->x_relative && layout->y_relative) {
-        int x_value = 0, y_value = 0;
-        if (len >= need_x_bytes) {
-            unsigned int x_raw = hid_extract_bits(
-                report, len, base_bit + layout->x_bit, layout->x_size);
-            x_value = (layout->x_min < 0) ?
-                      hid_signed_bits(x_raw, layout->x_size) : (int)x_raw;
-        }
-        if (len >= need_y_bytes) {
-            unsigned int y_raw = hid_extract_bits(
-                report, len, base_bit + layout->y_bit, layout->y_size);
-            y_value = (layout->y_min < 0) ?
-                      hid_signed_bits(y_raw, layout->y_size) : (int)y_raw;
-        }
-        mouse_handle_usb_report(buttons, x_value, y_value, 0);
-        return;
-    }
-
-    /* Absolute pointing device */
-    int screen_x = current_x;
-    int screen_y = current_y;
-
-    if (len >= need_x_bytes) {
-        unsigned int x_raw = hid_extract_bits(
-            report, len, base_bit + layout->x_bit, layout->x_size);
-        int x_value = (layout->x_min < 0) ?
-                      hid_signed_bits(x_raw, layout->x_size) : (int)x_raw;
-        if (layout->x_relative) {
-            screen_x += x_value;
-        } else if (layout->x_max > layout->x_min) {
-            screen_x = (x_value - layout->x_min) * (screen_w - 1) /
-                       (layout->x_max - layout->x_min);
-        }
-    }
-
-    if (len >= need_y_bytes) {
-        unsigned int y_raw = hid_extract_bits(
-            report, len, base_bit + layout->y_bit, layout->y_size);
-        int y_value = (layout->y_min < 0) ?
-                      hid_signed_bits(y_raw, layout->y_size) : (int)y_raw;
-        if (layout->y_relative) {
-            screen_y += y_value;
-        } else if (layout->y_max > layout->y_min) {
-            screen_y = (y_value - layout->y_min) * (screen_h - 1) /
-                       (layout->y_max - layout->y_min);
-        }
-    }
-
-    mouse_handle_usb_absolute(buttons, screen_x, screen_y);
-}
-
-static void apply_vmware_control_report(hid_device_t* hid,
-                                        const unsigned char* report, int len,
-                                        const char* source)
-{
-    if (!hid || !report || len <= 0) return;
-
-    int buttons = hid_mouse_buttons(hid, report, len);
-    int previous = hid_mouse_buttons(
-        hid, hid->prev_report, hid->report_len);
-
-    if (hid->control_reports_logged < 16 ||
-        (buttons != previous && hid->button_reports_logged < 64)) {
-        if (buttons != previous) hid->button_reports_logged++;
-        hid->control_reports_logged++;
-        log_printf("[HIDCTL] %s len=%d btn=%d prev=%d raw="
-                   "%X %X %X %X %X %X %X %X\n",
-                   source, len, buttons, previous,
-                   report[0], len > 1 ? report[1] : 0,
-                   len > 2 ? report[2] : 0, len > 3 ? report[3] : 0,
-                   len > 4 ? report[4] : 0, len > 5 ? report[5] : 0,
-                   len > 6 ? report[6] : 0, len > 7 ? report[7] : 0);
-    }
-
-    int current_x = 0;
-    int current_y = 0;
-    mouse_get(&current_x, &current_y, (int*)0);
-    mouse_handle_usb_absolute(buttons, current_x, current_y);
-    hid->prev_report[0] = report[0];
-}
-
-static void recover_interrupt_endpoint(hid_device_t* hid)
-{
-    if (!hid || !hid->dev || !hid->ep) return;
-
-    unsigned short endpoint = (unsigned short)(hid->ep->address | 0x80U);
-    int ret = usb_control_msg(hid->dev,
-                              USB_DIR_OUT | USB_RT_STANDARD |
-                              USB_RT_ENDPOINT,
-                              USB_REQ_CLEAR_FEATURE, 0, endpoint,
-                              (void*)0, 0);
-    if (ret >= 0) hid->ep->toggle = 0;
-}
-
-int usb_hid_attach(usb_device_t* dev)
-{
-    if (!dev || g_hid_count >= HID_MAX_DEVICES) return -1;
-
-    /* Find Interrupt IN endpoint */
-    usb_endpoint_t* ep = (usb_endpoint_t*)0;
-    for (int i = 0; i < dev->endpoint_count; i++) {
-        if (dev->endpoints[i].type == USB_EP_TYPE_INTERRUPT &&
-            dev->endpoints[i].direction == USB_DIR_IN) {
-            ep = &dev->endpoints[i];
+static int attach_hid_endpoint(usb_device_t* device,
+                               usb_endpoint_t* endpoint) {
+    int slot_index = -1;
+    for (int i = 0; i < USB_HID_MAX_DEVICES; i++) {
+        if (!g_hids[i].used) {
+            slot_index = i;
             break;
         }
     }
-    if (!ep) {
-        log_printf("[HID  ] No interrupt IN endpoint found on dev %u\n", dev->address);
-        return -1;
+    if (slot_index < 0) return -1;
+
+    hid_state_t* hid = &g_hids[slot_index];
+    memset(hid, 0, sizeof(*hid));
+    hid->used = true;
+    hid->device = device;
+    hid->endpoint = endpoint;
+    hid->interface_number = endpoint->interface_number;
+
+    uint8_t desc_buf[256];
+    memset(desc_buf, 0, sizeof(desc_buf));
+    uint16_t desc_len = endpoint->hid_report_desc_len ? endpoint->hid_report_desc_len : sizeof(desc_buf);
+    if (desc_len > sizeof(desc_buf)) desc_len = sizeof(desc_buf);
+
+    int result = usb_control_msg(
+        device, USB_DIR_IN | USB_RT_STANDARD | USB_RT_INTERFACE,
+        USB_REQ_GET_DESCRIPTOR, (USB_DT_REPORT << 8),
+        endpoint->interface_number, desc_buf, desc_len);
+
+    if (result > 0) {
+        parse_report_descriptor(desc_buf, result, &hid->descriptor);
     }
 
-    hid_device_t* hid = &g_hid_devices[g_hid_count];
-    usb_memset(hid, 0, sizeof(hid_device_t));
-    hid->dev = dev;
-    hid->ep = ep;
-
-    int vmware_mouse = dev->vendor == HID_VMWARE_VENDOR_ID &&
-                       dev->product == HID_VMWARE_MOUSE_PID;
-    unsigned char report_desc[256];
-    usb_memset(report_desc, 0, sizeof(report_desc));
-    int report_desc_len = 0;
-    if (dev->interface_protocol == 0 ||
-        dev->interface_protocol == USB_HID_PROTOCOL_MOUSE ||
-        vmware_mouse) {
-        report_desc_len = usb_control_msg(
-            dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_INTERFACE,
-            USB_REQ_GET_DESCRIPTOR, (USB_DT_REPORT << 8) | 0,
-            dev->interface_number, report_desc, sizeof(report_desc));
+    if (endpoint->interface_protocol == USB_HID_PROTOCOL_KBD ||
+        hid->descriptor.keyboard) {
+        hid->keyboard = true;
     }
-    if (report_desc_len > 0) {
-        hid_parse_mouse_layout(report_desc, report_desc_len,
-                               &hid->mouse_layout);
+    if (endpoint->interface_protocol == USB_HID_PROTOCOL_MOUSE ||
+        hid->descriptor.mouse) {
+        hid->mouse = true;
     }
 
-    log_printf("[HID  ] descriptor dev %u: class=%X subclass=%X protocol=%X "
-               "endpoint=%X packet=%u interval=%u\n",
-               dev->address, dev->class_code, dev->subclass,
-               dev->interface_protocol,
-               ep->address, ep->max_packet, ep->interval);
-    log_printf("[HID  ] dev=%u interface=%u endpoints=%d\n",
-               dev->address, dev->interface_number, dev->endpoint_count);
-    for (int i = 0; i < dev->endpoint_count; i++) {
-        log_printf("[HID  ] endpoint[%d] addr=%X dir=%X type=%X "
-                   "packet=%u interval=%u\n",
-                   i, dev->endpoints[i].address, dev->endpoints[i].direction,
-                   dev->endpoints[i].type, dev->endpoints[i].max_packet,
-                   dev->endpoints[i].interval);
-    }
-
-    /* Detect Keyboard vs Mouse */
-    if (vmware_mouse) {
-        hid->type = HID_TYPE_MOUSE;
-        if (vmware_mouse_init() == 0) {
-            hid->hypervisor_mouse = 1;
-            log_printf("[HID  ] VMware USB mouse uses VMMouse "
-                       "button/position channel\n");
-        } else {
-            log_printf("[HID  ] VMware VMMouse unavailable; "
-                       "using USB report path\n");
+    if (endpoint->interface_subclass == USB_HID_SUBCLASS_BOOT &&
+        (!hid->keyboard && !hid->mouse)) {
+        if (endpoint->interface_protocol == USB_HID_PROTOCOL_KBD) {
+            hid->keyboard = true;
+        } else if (endpoint->interface_protocol == USB_HID_PROTOCOL_MOUSE) {
+            hid->mouse = true;
         }
-        /*
-         * VMware Virtual USB Mouse uses an absolute report:
-         *   byte 0: buttons (bit 0: left, bit 1: right, bit 2: middle)
-         *   bytes 2..3: absolute X (little-endian, bit 16)
-         *   bytes 4..5: absolute Y (little-endian, bit 32)
-         */
-        hid->mouse_layout.valid = 1;
-        hid->mouse_layout.report_id = 0;
-        hid->mouse_layout.button_bit = 0;
-        hid->mouse_layout.button_size = 1;
-        hid->mouse_layout.button_count = 3;
-        hid->mouse_layout.x_bit = 16;
-        hid->mouse_layout.x_size = 16;
-        hid->mouse_layout.x_min = 0;
-        hid->mouse_layout.x_max = 32767;
-        hid->mouse_layout.x_relative = 0;
-        hid->mouse_layout.y_bit = 32;
-        hid->mouse_layout.y_size = 16;
-        hid->mouse_layout.y_min = 0;
-        hid->mouse_layout.y_max = 32767;
-        hid->mouse_layout.y_relative = 0;
+    }
 
-        hid->report_len = ep->max_packet;
-        if (hid->report_len < 6) hid->report_len = 6;
-        if (hid->report_len > (int)sizeof(hid->prev_report)) {
-            hid->report_len = (int)sizeof(hid->prev_report);
-        }
-        log_printf("[HID  ] report descriptor len=%d layout=%s "
-                   "X=%d:%d Y=%d:%d buttons=%d:%d reportID=%d\n",
-                   report_desc_len, hid->mouse_layout.valid ? "mouse" : "generic",
-                   hid->mouse_layout.x_bit, hid->mouse_layout.x_size,
-                   hid->mouse_layout.y_bit, hid->mouse_layout.y_size,
-                   hid->mouse_layout.button_bit, hid->mouse_layout.button_count,
-                   hid->mouse_layout.report_id);
-        g_mouse_count++;
-        log_printf("[HID  ] Attached VMware Virtual USB Mouse on dev %u\n",
-                   dev->address);
-    } else if (dev->interface_protocol == USB_HID_PROTOCOL_KBD ||
-        dev->protocol == USB_HID_PROTOCOL_KBD) {
-        hid->type = HID_TYPE_KEYBOARD;
-        hid->report_len = 8;
-        g_kbd_count++;
-        log_printf("[HID  ] Attached USB Keyboard on dev %u (endpoint 0x%X)\n",
-                   dev->address, ep->address);
-    } else if (dev->interface_protocol == USB_HID_PROTOCOL_MOUSE ||
-               dev->protocol == USB_HID_PROTOCOL_MOUSE) {
-        hid->type = HID_TYPE_MOUSE;
-        hid->report_len = 4;
-        g_mouse_count++;
-        log_printf("[HID  ] Attached USB Mouse on dev %u (endpoint 0x%X)\n",
-                   dev->address, ep->address);
-    } else {
-        log_printf("[HID  ] Interface protocol %X is not a supported "
-                   "boot HID on dev %u\n",
-                   dev->interface_protocol, dev->address);
+    if (!hid->keyboard && !hid->mouse) {
+        memset(hid, 0, sizeof(*hid));
         return -1;
     }
 
     /*
-     * Boot protocol exists only for boot subclass interfaces.
-     * Keyboards need Boot Protocol (0) so they report standard 8-byte
-     * scancodes. Pointing devices (especially VMware Virtual USB Mouse)
-     * must remain in Report Protocol (1) so absolute coordinates and
-     * multi-button descriptors are preserved and operational.
+     * Some UEFI / CSM emulated HIDs (e.g. VMware virtual UHCI mouse) fail or
+     * NAK HID class-specific SET_IDLE or SET_PROTOCOL requests.
+     * We attempt them with short delays, but ignore errors if they fail.
      */
-    if (dev->interface_protocol == USB_HID_PROTOCOL_KBD) {
-        int ret = usb_control_msg(
-            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-            0x0B /* SET_PROTOCOL */, 0, dev->interface_number,
-            (void*)0, 0);
-        if (ret < 0) {
-            log_printf("[HID  ] SET_PROTOCOL rejected on dev %u\n",
-                       dev->address);
-        }
-    } else if (dev->interface_protocol == USB_HID_PROTOCOL_MOUSE && !vmware_mouse) {
-        /*
-         * Boot mouse interfaces can be switched to Report Protocol (1).
-         * VMware Virtual USB Mouse does not implement the boot subclass;
-         * querying or sending SET_PROTOCOL to it causes STALL, so leave it untouched.
-         */
-        usb_control_msg(
-            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-            0x0B /* SET_PROTOCOL */, 1 /* Report */, dev->interface_number,
-            (void*)0, 0);
-    } else if (vmware_mouse && !hid->hypervisor_mouse) {
-        /*
-         * VMware's report-protocol path exposes absolute coordinates but,
-         * on several Workstation versions, never updates the button bits in
-         * interrupt or GET_REPORT input reports. Its boot-mouse mode uses the
-         * standard 4-byte report and preserves click edges.
-         */
-        int ret = usb_control_msg(
-            dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-            0x0B /* SET_PROTOCOL */, 0 /* Boot */, dev->interface_number,
-            (void*)0, 0);
-        log_printf("[HID  ] VMware SET_PROTOCOL(Boot) result=%d\n", ret);
-        if (ret >= 0) {
-            hid->vmware_boot_protocol = 1;
-            hid->report_len = 4;
-            usb_memset(&hid->mouse_layout, 0,
-                       sizeof(hid->mouse_layout));
+    (void)hid_send_class_request(device, endpoint->interface_number,
+                                 0x0A /* SET_IDLE */, 0, NULL, 0, USB_DIR_OUT);
+    usb_delay_ms(10);
+
+    /*
+     * Preferred protocol policy:
+     * If the report descriptor parsed successfully and declared keyboard or mouse
+     * fields, switch to Report Protocol (value 1) so wheels, extra buttons, and
+     * full usage tables work.
+     * If report descriptor was unavailable or unparseable, fall back to Boot
+     * Protocol (value 0).
+     */
+    bool use_boot = false;
+    if (endpoint->interface_subclass == USB_HID_SUBCLASS_BOOT) {
+        if (!hid->descriptor.report_count) {
+            use_boot = true;
+            (void)hid_send_class_request(device, endpoint->interface_number,
+                                         0x0B /* SET_PROTOCOL */, 0,
+                                         NULL, 0, USB_DIR_OUT);
+            usb_delay_ms(10);
+        } else {
+            (void)hid_send_class_request(device, endpoint->interface_number,
+                                         0x0B /* SET_PROTOCOL */, 1,
+                                         NULL, 0, USB_DIR_OUT);
+            usb_delay_ms(10);
         }
     }
 
-    if (vmware_mouse) {
-        if (hid->hypervisor_mouse) {
-            log_printf("[HID  ] VMware HID class setup handled by VMMouse\n");
-        } else {
-            int idle_ret = usb_control_msg(
-                dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-                HID_REQ_SET_IDLE, 0, dev->interface_number, (void*)0, 0);
-            log_printf("[HID  ] VMware SET_IDLE result=%d\n", idle_ret);
-
-            if (hid->vmware_boot_protocol) {
-                log_printf("[HID  ] VMware boot mouse reports enabled\n");
-            } else {
-                unsigned char control_report[16];
-                usb_memset(control_report, 0, sizeof(control_report));
-                int control_len = usb_control_msg(
-                    dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
-                    HID_REQ_GET_REPORT,
-                    (HID_REPORT_INPUT << 8) | 0, dev->interface_number,
-                    control_report, hid->report_len);
-                if (control_len > 0) {
-                    hid->control_poll_enabled = 1;
-                    apply_vmware_control_report(
-                        hid, control_report, control_len, "initial");
-                } else {
-                    log_printf("[HID  ] VMware GET_REPORT unsupported "
-                               "(result=%d)\n", control_len);
-                }
-            }
+    if (use_boot) {
+        if (hid->keyboard) {
+            hid->boot_keyboard = true;
+            hid->report_length = 8;
+            hid_report_layout_t* layout = &hid->descriptor.reports[0];
+            layout->used = true;
+            layout->modifiers_offset = 0;
+            layout->modifiers_count = 8;
+            layout->keys_offset = 16;
+            layout->keys_size = 8;
+            layout->keys_count = 6;
+            layout->bit_end = 64;
+            hid->descriptor.report_count = 1;
+        } else if (hid->mouse) {
+            hid->report_length = 3;
+            hid_report_layout_t* layout = &hid->descriptor.reports[0];
+            layout->used = true;
+            layout->buttons_offset = 0;
+            layout->buttons_count = 3;
+            layout->x_offset = 8;
+            layout->x_size = 8;
+            layout->y_offset = 16;
+            layout->y_size = 8;
+            layout->x_absolute = false;
+            layout->y_absolute = false;
+            layout->bit_end = 24;
+            hid->descriptor.report_count = 1;
         }
     } else {
-        /* Set Idle Rate to 0 (only report changes). */
-        usb_control_msg(dev, USB_DIR_OUT | USB_RT_CLASS | USB_RT_INTERFACE,
-                        HID_REQ_SET_IDLE, 0, dev->interface_number,
-                        (void*)0, 0);
+        hid->report_length = hid->descriptor.report_length;
+        if (hid->report_length == 0 ||
+            hid->report_length > endpoint->max_packet) {
+            hid->report_length = (uint8_t)endpoint->max_packet;
+        }
     }
 
-    g_hid_count++;
-    hid_recompute_controllers();
+    if (hid->report_length == 0 || hid->report_length > HID_REPORT_MAX_BYTES) {
+        hid->report_length = (uint8_t)(endpoint->max_packet > HID_REPORT_MAX_BYTES
+                                           ? HID_REPORT_MAX_BYTES
+                                           : endpoint->max_packet);
+    }
+
+    if (hid->keyboard) {
+        g_keyboards++;
+        log_printf("[USBHID] Attached keyboard address=%u endpoint=0x%02x report=%u mode=%s\n",
+                   device->address, endpoint->address, hid->report_length,
+                   use_boot ? "boot" : "report");
+    }
+    if (hid->mouse) {
+        g_mice++;
+        bool wheel = false;
+        for (uint8_t r = 0; r < hid->descriptor.report_count; r++) {
+            if (hid->descriptor.reports[r].wheel_size) wheel = true;
+        }
+        log_printf("[USBHID] Attached mouse address=%u endpoint=0x%02x report=%u wheel=%d mode=report\n",
+                   device->address, endpoint->address, hid->report_length,
+                   wheel);
+    }
     return 0;
 }
 
-void usb_hid_detach(usb_device_t* dev)
-{
-    for (int i = 0; i < g_hid_count; i++) {
-        if (g_hid_devices[i].dev != dev) continue;
+int usb_hid_attach(usb_device_t* device) {
+    if (!device || !device->hci) return -1;
 
-        if (g_hid_devices[i].type == HID_TYPE_KEYBOARD && g_kbd_count > 0) {
-            g_kbd_count--;
-        } else if (g_hid_devices[i].type == HID_TYPE_MOUSE &&
-                   g_mouse_count > 0) {
-            g_mouse_count--;
-            if (g_mouse_count == 0) mouse_notify_usb_detached();
-        }
-
-        g_hid_count--;
-        if (i != g_hid_count) {
-            g_hid_devices[i] = g_hid_devices[g_hid_count];
-        }
-        usb_memset(&g_hid_devices[g_hid_count], 0, sizeof(hid_device_t));
-        hid_recompute_controllers();
-        return;
-    }
-}
-
-void usb_hid_poll(void)
-{
-    if (g_hid_count == 0) return;
-
-    unsigned char report_buf[16];
-
-    for (int i = 0; i < g_hid_count; i++) {
-        hid_device_t* hid = &g_hid_devices[i];
-        if (!hid->dev || !hid->ep || !hid->dev->hci || !hid->dev->hci->intr_in) {
+    int attached = 0;
+    for (uint8_t i = 0; i < device->endpoint_count; i++) {
+        usb_endpoint_t* endpoint = &device->endpoints[i];
+        if (endpoint->direction != USB_DIR_IN ||
+            endpoint->type != USB_EP_TYPE_INTERRUPT) {
             continue;
         }
-
-        if (hid->hypervisor_mouse) {
-            vmware_mouse_poll();
+        if (endpoint->interface_class != 0 &&
+            endpoint->interface_class != USB_CLASS_HID) {
             continue;
         }
-
-        extern volatile int global_tick;
-        if (hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
-            hid->dev->product == HID_VMWARE_MOUSE_PID &&
-            hid->control_poll_enabled &&
-            global_tick - hid->last_control_tick >= 2) {
-            hid->last_control_tick = global_tick;
-            unsigned char control_report[16];
-            usb_memset(control_report, 0, sizeof(control_report));
-            int control_len = usb_control_msg(
-                hid->dev, USB_DIR_IN | USB_RT_CLASS | USB_RT_INTERFACE,
-                HID_REQ_GET_REPORT,
-                (HID_REPORT_INPUT << 8) | 0, hid->dev->interface_number,
-                control_report, hid->report_len);
-            if (control_len > 0) {
-                apply_vmware_control_report(
-                    hid, control_report, control_len, "poll");
-            } else {
-                hid->control_poll_enabled = 0;
-                log_printf("[HID  ] VMware GET_REPORT polling disabled "
-                           "(result=%d)\n", control_len);
-            }
+        if (attach_hid_endpoint(device, endpoint) == 0) {
+            attached++;
         }
+    }
 
-        if (hid->report_seen &&
-            global_tick - hid->last_debug_tick >= 100) {
-            hid->last_debug_tick = global_tick;
-            log_printf("[HIDHB] dev=%u reports=%u last="
-                       "%X %X %X %X %X %X %X %X\n",
-                       hid->dev->address, hid->report_count,
-                       hid->prev_report[0], hid->prev_report[1],
-                       hid->prev_report[2], hid->prev_report[3],
-                       hid->prev_report[4], hid->prev_report[5],
-                       hid->prev_report[6], hid->prev_report[7]);
+    if (attached == 0) {
+        log_printf("[USBHID] No attachable HID interrupt IN endpoint on device %u (subclass=%u protocol=%u)\n",
+                   device->address, device->interface_subclass,
+                   device->interface_protocol);
+        return -1;
+    }
+    return 0;
+}
+
+void usb_hid_detach(usb_device_t* device) {
+    bool mouse_removed = false;
+    for (int i = 0; i < USB_HID_MAX_DEVICES; i++) {
+        if (g_hids[i].used && g_hids[i].device == device) {
+            if (g_hids[i].keyboard && g_keyboards) g_keyboards--;
+            if (g_hids[i].mouse && g_mice) {
+                g_mice--;
+                mouse_removed = true;
+            }
+            memset(&g_hids[i], 0, sizeof(g_hids[i]));
         }
+    }
+    if (mouse_removed && g_mice == 0) {
+        mouse_notify_usb_detached();
+    }
+}
 
-        /*
-         * Drain up to 8 reports to keep pointer tracking smooth, but break
-         * immediately when button state transitions occur or on keyboard reports.
-         * This prevents collapsing a press/release edge within a single poll cycle.
-         */
-        for (int pass = 0; pass < 8; pass++) {
-            usb_memset(report_buf, 0, sizeof(report_buf));
-            int len = hid->report_len;
-            int ret = hid->dev->hci->intr_in(
-                hid->dev->hci, hid->dev, hid->ep, report_buf, len);
-            if (ret <= 0) {
-                if (ret < 0) recover_interrupt_endpoint(hid);
-                break;
-            }
-            hid->report_count++;
-
-            if (!hid->report_seen) {
-                hid->report_seen = 1;
-                log_printf("[HID  ] first report from dev %u (%d bytes): "
-                           "%X %X %X %X %X %X %X %X\n",
-                           hid->dev->address, ret,
-                           report_buf[0], report_buf[1], report_buf[2],
-                           report_buf[3], report_buf[4], report_buf[5],
-                           report_buf[6], report_buf[7]);
-            }
-            if (hid->report_count <= 12) {
-                log_printf("[HIDRX] n=%u len=%d raw="
-                           "%X %X %X %X %X %X %X %X\n",
-                           hid->report_count, ret,
-                           report_buf[0], report_buf[1], report_buf[2],
-                           report_buf[3], report_buf[4], report_buf[5],
-                           report_buf[6], report_buf[7]);
+void usb_hid_poll(void) {
+    for (int i = 0; i < USB_HID_MAX_DEVICES; i++) {
+        hid_state_t* hid = &g_hids[i];
+        if (!hid->used || !hid->device || !hid->device->hci ||
+            !hid->device->hci->intr_in) {
+            continue;
+        }
+        for (int pkt = 0; pkt < 4; pkt++) {
+            uint8_t report[HID_REPORT_MAX_BYTES];
+            memset(report, 0, sizeof(report));
+            int length = hid->device->hci->intr_in(
+                hid->device->hci, hid->device, hid->endpoint, report,
+                hid->report_length);
+            if (length <= 0) break;
+            hid->reports++;
+            if (hid->reports <= 8) {
+                log_printf("[USBHID] report address=%u len=%d data=%02x %02x %02x %02x\n",
+                           hid->device->address, length, report[0], report[1],
+                           report[2], report[3]);
             }
 
-            int curr_btn = hid_mouse_buttons(hid, report_buf, ret);
-            int prev_btn = hid_mouse_buttons(
-                hid, hid->prev_report, hid->report_len
-            );
-            int button_edge = (curr_btn != prev_btn);
-            int raw_button_changed =
-                report_buf[0] != hid->prev_report[0] ||
-                report_buf[1] != hid->prev_report[1] ||
-                (ret > 6 &&
-                 (report_buf[6] != hid->prev_report[6] ||
-                  report_buf[7] != hid->prev_report[7]));
-
-            if (hid->dev->vendor == HID_VMWARE_VENDOR_ID &&
-                hid->dev->product == HID_VMWARE_MOUSE_PID &&
-                (button_edge || raw_button_changed ||
-                 ret != hid->report_len) &&
-                hid->button_reports_logged < 64) {
-                hid->button_reports_logged++;
-                log_printf("[HIDBTN] tick=%d len=%d btn=%d prev=%d raw="
-                           "%X %X %X %X %X %X %X %X\n",
-                           global_tick, ret, curr_btn, prev_btn,
-                           report_buf[0], report_buf[1], report_buf[2],
-                           report_buf[3], report_buf[4], report_buf[5],
-                           report_buf[6], report_buf[7]);
+            int payload_offset = 0;
+            hid_report_layout_t* layout =
+                layout_for_report(hid, report, length, &payload_offset);
+            if (!layout) continue;
+            const uint8_t* payload = report + payload_offset;
+            int payload_length = length - payload_offset;
+            if (hid->keyboard && layout->keys_count) {
+                process_keyboard(hid, layout, payload, payload_length);
             }
-
-            if (hid->type == HID_TYPE_KEYBOARD && ret >= 8) {
-                process_keyboard_report(hid, report_buf);
-                break;
-            } else if (hid->type == HID_TYPE_MOUSE && ret > 0) {
-                process_mouse_report(hid, report_buf, ret);
-                int copy_len = ret < (int)sizeof(hid->prev_report) ?
-                               ret : (int)sizeof(hid->prev_report);
-                usb_memset(hid->prev_report, 0, sizeof(hid->prev_report));
-                usb_memcpy(hid->prev_report, report_buf, (unsigned int)copy_len);
-
-                /*
-                 * Stop draining immediately when:
-                 * 1) Button state changed (press or release edge)
-                 * 2) Any button is currently pressed (hold down / drag)
-                 * This ensures the UI / window manager processes every button transition
-                 * and gets accurate 1-to-1 frames without high-speed mouse reports
-                 * swallowing edges or coalescing clicks!
-                 */
-                if (button_edge || curr_btn != 0) {
-                    break;
-                }
+            if (hid->mouse && (layout->buttons_count || layout->x_size ||
+                               layout->y_size)) {
+                process_mouse(hid, layout, payload, payload_length);
             }
         }
     }
 }
 
-int usb_hid_keyboard_count(void)
-{
-    return g_kbd_count;
+int usb_hid_selftest(void) {
+    static const uint8_t keyboard_descriptor[] = {
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+        0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,
+        0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0
+    };
+    static const uint8_t mouse_descriptor[] = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F,
+        0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01,
+        0x81, 0x06, 0xC0, 0xC0
+    };
+
+    hid_descriptor_t keyboard;
+    hid_descriptor_t mouse;
+    memset(&keyboard, 0, sizeof(keyboard));
+    memset(&mouse, 0, sizeof(mouse));
+    parse_report_descriptor(keyboard_descriptor,
+                            sizeof(keyboard_descriptor), &keyboard);
+    parse_report_descriptor(mouse_descriptor, sizeof(mouse_descriptor),
+                            &mouse);
+    if (!keyboard.keyboard || !keyboard.report_count ||
+        !mouse.mouse || !report_descriptor_has_wheel(
+                            mouse_descriptor, sizeof(mouse_descriptor))) {
+        log_printf("[USBHID] Descriptor parser self-test FAILED\n");
+        return -1;
+    }
+    log_printf("[USBHID] Descriptor parser self-test PASS (generic keyboard + mouse)\n");
+    return 0;
 }
 
-int usb_hid_mouse_count(void)
-{
-    return g_mouse_count;
+int usb_hid_keyboard_count(void) {
+    return g_keyboards;
 }
 
-int usb_hid_controller_active(void)
-{
-    return g_active_ctrls;
+int usb_hid_mouse_count(void) {
+    return g_mice;
 }
 
-const char* usb_hid_controller_summary(void)
-{
-    if ((g_active_ctrls & USB_HID_CTRL_EHCI) && (g_active_ctrls & USB_HID_CTRL_UHCI)) {
-        return "EHCI 2.0 + UHCI HID";
-    }
-    if (g_active_ctrls & USB_HID_CTRL_EHCI) {
-        return "EHCI 2.0 HID";
-    }
-    if (g_active_ctrls & USB_HID_CTRL_UHCI) {
-        return "UHCI 1.1 HID";
-    }
-    return "None Active";
+int usb_hid_controller_active(void) {
+    return (g_keyboards > 0 || g_mice > 0);
+}
+
+const char* usb_hid_controller_summary(void) {
+    if (g_keyboards > 0 && g_mice > 0) return "USB Keyboard + Mouse";
+    if (g_keyboards > 0) return "USB Keyboard";
+    if (g_mice > 0) return "USB Mouse";
+    return "No USB input devices";
 }

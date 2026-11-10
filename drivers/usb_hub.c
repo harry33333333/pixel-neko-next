@@ -1,147 +1,246 @@
-/*
- * Pixel Neko Next - USB Hub Class Driver
- *
- * Derived from FreeBSD sys/dev/usb/usb_hub.c
- * Copyright (c) 2008 Hans Petter Selasky <hselasky@FreeBSD.org>
- * Copyright (c) 1998 Lennart Augustsson <lennart@augustsson.net>
- * Copyright (c) 2026 Pixel Neko Project
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
 #include "usb_hub.h"
-#include "usb_core.h"
 #include "timer.h"
 #include "log.h"
+#include "string.h"
 
-int usb_hub_probe(usb_device_t* hub)
-{
-    if (!hub || !hub->hci) return -1;
+typedef struct {
+    usb_device_t* device;
+    usb_endpoint_t* status_endpoint;
+    uint8_t ports;
+    uint16_t power_good_ms;
+    uint64_t retry_tick[USB_MAX_HUB_PORTS + 1];
+} hub_state_t;
 
-    log_printf("[HUB  ] Probing hub at address %u (speed %u)...\n", hub->address, hub->speed);
+static hub_state_t g_hubs[USB_HUB_MAX_DEVICES];
+static int g_hub_count = 0;
+static uint64_t g_last_poll_tick = 0;
 
-    /* 1. Read Hub Descriptor (Class Descriptor Type 0x29) */
-    unsigned char hub_desc[16];
-    usb_memset(hub_desc, 0, sizeof(hub_desc));
+static int hub_request(usb_device_t* hub, int direction, uint8_t request,
+                       uint16_t value, uint16_t index, void* data, int length) {
+    return usb_control_msg(
+        hub, direction | USB_RT_CLASS | USB_RT_OTHER,
+        request, value, index, data, length);
+}
 
-    int ret = usb_control_msg(hub, USB_DIR_IN | USB_RT_CLASS | USB_RT_DEVICE,
-                              USB_REQ_GET_DESCRIPTOR, (USB_DT_HUB << 8) | 0, 0,
-                              hub_desc, 8);
-    if (ret < 8 || hub_desc[0] < 7 || hub_desc[1] != USB_DT_HUB) {
-        log_printf("[HUB  ] Failed to read hub descriptor (ret=%d)\n", ret);
+static int hub_get_port_status(usb_device_t* hub, uint8_t port,
+                               uint16_t* status, uint16_t* change) {
+    uint32_t buffer = 0;
+    int result = hub_request(hub, USB_DIR_IN, USB_REQ_GET_STATUS,
+                             0, port, &buffer, 4);
+    if (result < 4) return -1;
+    if (status) *status = (uint16_t)buffer;
+    if (change) *change = (uint16_t)(buffer >> 16);
+    return 0;
+}
+
+static void hub_clear_changes(usb_device_t* hub, uint8_t port,
+                              uint16_t changes) {
+    if (changes & HUB_C_PORT_CONNECTION) {
+        hub_request(hub, USB_DIR_OUT, USB_REQ_CLEAR_FEATURE,
+                    HUB_FEATURE_C_CONNECTION, port, NULL, 0);
+    }
+    if (changes & HUB_C_PORT_ENABLE) {
+        hub_request(hub, USB_DIR_OUT, USB_REQ_CLEAR_FEATURE,
+                    HUB_FEATURE_C_ENABLE, port, NULL, 0);
+    }
+    if (changes & (1u << 2)) { /* C_PORT_SUSPEND */
+        hub_request(hub, USB_DIR_OUT, USB_REQ_CLEAR_FEATURE,
+                    18, port, NULL, 0);
+    }
+    if (changes & (1u << 3)) { /* C_PORT_OVER_CURRENT */
+        hub_request(hub, USB_DIR_OUT, USB_REQ_CLEAR_FEATURE,
+                    19, port, NULL, 0);
+    }
+    if (changes & HUB_C_PORT_RESET) {
+        hub_request(hub, USB_DIR_OUT, USB_REQ_CLEAR_FEATURE,
+                    HUB_FEATURE_C_RESET, port, NULL, 0);
+    }
+}
+
+static uint8_t hub_port_speed(usb_device_t* hub, uint16_t status) {
+    if (hub->speed == USB_SPEED_SUPER) return USB_SPEED_SUPER;
+    if (status & HUB_PORT_LOW_SPEED) return USB_SPEED_LOW;
+    if (status & HUB_PORT_HIGH_SPEED) return USB_SPEED_HIGH;
+    return USB_SPEED_FULL;
+}
+
+static void hub_scan_port(usb_device_t* hub, hub_state_t* state, uint8_t port) {
+    uint16_t status = 0;
+    uint16_t change = 0;
+    if (hub_get_port_status(hub, port, &status, &change) != 0) return;
+
+    bool connected = (status & HUB_PORT_CONNECTION) != 0;
+    usb_device_t* child = usb_find_child(hub, port);
+    if (!connected) {
+        if (child) {
+            usb_disconnect_child(hub, port);
+        }
+        hub_clear_changes(hub, port, change);
+        return;
+    }
+
+    if (child) {
+        hub_clear_changes(hub, port, change);
+        return;
+    }
+    if (state->retry_tick[port] > (uint64_t)timer_get_ticks()) {
+        hub_clear_changes(hub, port, change);
+        return;
+    }
+
+    log_printf("[HUB ] Device connected: hub=%u port=%u status=0x%04x\n",
+               hub->address, port, status);
+    usb_delay_ms(20);
+    hub_clear_changes(hub, port, change);
+
+    hub_request(hub, USB_DIR_OUT, USB_REQ_SET_FEATURE,
+                HUB_FEATURE_PORT_RESET, port, NULL, 0);
+    usb_delay_ms(50);
+    for (int timeout = 0; timeout < 100; timeout++) {
+        if (hub_get_port_status(hub, port, &status, &change) != 0) return;
+        if (!(status & HUB_PORT_RESET)) break;
+        usb_delay_ms(1);
+    }
+    usb_delay_ms(20);
+    hub_clear_changes(hub, port, change);
+    if (hub_get_port_status(hub, port, &status, &change) != 0) return;
+    if (!(status & HUB_PORT_CONNECTION)) return;
+
+    if (status & HUB_PORT_RESET) {
+        log_printf("[HUB ] Port reset timed out: hub=%u port=%u status=0x%04x\n",
+                   hub->address, port, status);
+        state->retry_tick[port] = (uint64_t)timer_get_ticks() + 100;
+        return;
+    }
+
+    if (!(status & HUB_PORT_ENABLE)) {
+        log_printf("[HUB ] Port reset failed (HUB_PORT_ENABLE not set): hub=%u port=%u status=0x%04x\n",
+                   hub->address, port, status);
+        state->retry_tick[port] = (uint64_t)timer_get_ticks() + 100;
+        return;
+    }
+
+    uint8_t speed = hub_port_speed(hub, status);
+    log_printf("[HUB ] Port enabled: hub=%u port=%u speed=%s status=0x%04x\n",
+               hub->address, port, usb_speed_name(speed), status);
+    if (usb_enumerate_hub(hub->hci, hub, port, speed) == 0) {
+        child = usb_find_child(hub, port);
+        if (child) {
+            hub->child_address[port] = child->address;
+            hub->hub_ports_seen |= (uint16_t)(1u << port);
+            state->retry_tick[port] = 0;
+        }
+    } else {
+        state->retry_tick[port] = (uint64_t)timer_get_ticks() + 100;
+    }
+    (void)state;
+}
+
+int usb_hub_attach(usb_device_t* hub) {
+    if (!hub || g_hub_count >= USB_HUB_MAX_DEVICES) return -1;
+
+    uint8_t descriptor[16];
+    memset(descriptor, 0, sizeof(descriptor));
+    int result = -1;
+    if (hub->speed == USB_SPEED_SUPER) {
+        result = usb_control_msg(
+            hub, USB_DIR_IN | USB_RT_CLASS | USB_RT_DEVICE,
+            USB_REQ_GET_DESCRIPTOR, USB_DT_SS_HUB << 8, 0,
+            descriptor, 12);
+    }
+    if (result < 7 || (descriptor[1] != USB_DT_HUB && descriptor[1] != USB_DT_SS_HUB)) {
+        memset(descriptor, 0, sizeof(descriptor));
+        result = usb_control_msg(
+            hub, USB_DIR_IN | USB_RT_CLASS | USB_RT_DEVICE,
+            USB_REQ_GET_DESCRIPTOR, USB_DT_HUB << 8, 0,
+            descriptor, 8);
+        if (result >= 7 && descriptor[0] > 8 &&
+            descriptor[0] <= sizeof(descriptor)) {
+            int full_len = descriptor[0];
+            (void)usb_control_msg(
+                hub, USB_DIR_IN | USB_RT_CLASS | USB_RT_DEVICE,
+                USB_REQ_GET_DESCRIPTOR, USB_DT_HUB << 8, 0,
+                descriptor, full_len);
+        }
+    }
+    if (result < 7 || (descriptor[1] != USB_DT_HUB && descriptor[1] != USB_DT_SS_HUB)) {
+        log_printf("[HUB ] Invalid hub descriptor (result=%d)\n", result);
         return -1;
     }
 
-    unsigned char num_ports = hub_desc[2];
-    unsigned char pwr_good_time = hub_desc[5]; /* in 2ms units */
-    log_printf("[HUB  ] Hub has %u downstream ports, power-on delay %u ms\n",
-               num_ports, (unsigned int)pwr_good_time * 2);
-
-    if (num_ports == 0 || num_ports > 32) {
-        num_ports = 8; /* Reasonable fallback */
+    uint8_t ports = descriptor[2];
+    if (ports == 0 || ports > USB_MAX_HUB_PORTS) {
+        log_printf("[HUB ] Invalid hub port count %u\n", ports);
+        return -1;
     }
+    uint16_t power_good_ms = (uint16_t)descriptor[5] * 2u;
 
-    /* 2. Power on all downstream ports */
-    for (unsigned char p = 1; p <= num_ports; p++) {
-        usb_control_msg(hub, USB_DIR_OUT | USB_RT_CLASS | USB_RT_OTHER,
-                        USB_REQ_SET_FEATURE, HUB_FEATURE_PORT_POWER, p,
-                        (void*)0, 0);
-    }
-
-    int pwr_delay = (int)pwr_good_time * 2;
-    if (pwr_delay < 150) pwr_delay = 150;
-    sleep_ms(pwr_delay);
-
-    /* 3. Scan and reset connected downstream ports */
-    for (unsigned char p = 1; p <= num_ports; p++) {
-        unsigned int status_buf = 0;
-        ret = usb_control_msg(hub, USB_DIR_IN | USB_RT_CLASS | USB_RT_OTHER,
-                              USB_REQ_GET_STATUS, 0, p,
-                              &status_buf, 4);
-        if (ret < 4) continue;
-
-        unsigned short port_status = (unsigned short)(status_buf & 0xFFFF);
-        if (port_status & HUB_PORT_CONNECTION) {
-            log_printf("[HUB  ] Device connected on port %u (status=0x%X)\n",
-                       p, port_status);
-
-            /* Reset downstream port */
-            usb_control_msg(hub, USB_DIR_OUT | USB_RT_CLASS | USB_RT_OTHER,
-                            USB_REQ_SET_FEATURE, HUB_FEATURE_PORT_RESET, p,
-                            (void*)0, 0);
-            sleep_ms(50);
-
-            /* Poll until port reset clears and port enable is set */
-            int reset_timeout = 0;
-            int reset_done = 0;
-            while (reset_timeout < 100) {
-                status_buf = 0;
-                ret = usb_control_msg(hub,
-                                      USB_DIR_IN | USB_RT_CLASS | USB_RT_OTHER,
-                                      USB_REQ_GET_STATUS, 0, p,
-                                      &status_buf, 4);
-                if (ret < 4) break;
-                port_status = (unsigned short)(status_buf & 0xFFFF);
-                if (!(port_status & HUB_PORT_RESET)) {
-                    reset_done = 1;
-                    break;
-                }
-                sleep_ms(1);
-                reset_timeout++;
-            }
-            if (!reset_done) {
-                log_printf("[HUB  ] Port %u reset timed out\n", p);
-                continue;
-            }
-
-            /* Clear port change flags */
-            usb_control_msg(hub, USB_DIR_OUT | USB_RT_CLASS | USB_RT_OTHER,
-                            USB_REQ_CLEAR_FEATURE, HUB_FEATURE_C_RESET, p,
-                            (void*)0, 0);
-            usb_control_msg(hub, USB_DIR_OUT | USB_RT_CLASS | USB_RT_OTHER,
-                            USB_REQ_CLEAR_FEATURE, HUB_FEATURE_C_CONNECTION, p,
-                            (void*)0, 0);
-            usb_control_msg(hub, USB_DIR_OUT | USB_RT_CLASS | USB_RT_OTHER,
-                            USB_REQ_CLEAR_FEATURE, HUB_FEATURE_C_ENABLE, p,
-                            (void*)0, 0);
-
-            if (!(port_status & HUB_PORT_CONNECTION)) continue;
-
-            /* Determine downstream device speed */
-            int speed = USB_SPEED_FULL;
-            if (port_status & HUB_PORT_LOW_SPEED) {
-                speed = USB_SPEED_LOW;
-            } else if (port_status & HUB_PORT_HIGH_SPEED) {
-                speed = USB_SPEED_HIGH;
-            }
-
-            log_printf("[HUB  ] Port %u reset complete (status=0x%X, speed=%d)\n",
-                       p, port_status, speed);
-            sleep_ms(20);
-
-            /* Enumerate downstream device with parent hub information */
-            usb_enumerate_hub(hub->hci, hub, p, speed);
+    hub_state_t* state = &g_hubs[g_hub_count++];
+    state->device = hub;
+    state->status_endpoint = NULL;
+    for (uint8_t endpoint = 0; endpoint < hub->endpoint_count; endpoint++) {
+        if (hub->endpoints[endpoint].direction == USB_DIR_IN &&
+            hub->endpoints[endpoint].type == USB_EP_TYPE_INTERRUPT) {
+            state->status_endpoint = &hub->endpoints[endpoint];
+            break;
         }
     }
+    state->ports = ports;
+    state->power_good_ms = power_good_ms;
+    hub->hub_port_count = ports;
 
+    for (uint8_t port = 1; port <= ports; port++) {
+        hub_request(hub, USB_DIR_OUT, USB_REQ_SET_FEATURE,
+                    HUB_FEATURE_PORT_POWER, port, NULL, 0);
+    }
+    uint32_t delay = power_good_ms < 150 ? 150 : power_good_ms;
+    usb_delay_ms(delay);
+    log_printf("[HUB ] Attached address=%u ports=%u power_good=%ums\n",
+               hub->address, ports, power_good_ms);
+
+    for (uint8_t port = 1; port <= ports; port++) {
+        hub_scan_port(hub, state, port);
+    }
     return 0;
+}
+
+void usb_hub_detach(usb_device_t* hub) {
+    for (int i = 0; i < g_hub_count; i++) {
+        if (g_hubs[i].device != hub) continue;
+        g_hubs[i] = g_hubs[g_hub_count - 1];
+        g_hub_count--;
+        return;
+    }
+}
+
+void usb_hub_poll(void) {
+    uint64_t now = (uint64_t)timer_get_ticks();
+    bool status_change = false;
+    for (int i = 0; i < g_hub_count; i++) {
+        hub_state_t* state = &g_hubs[i];
+        if (!state->device || !state->status_endpoint ||
+            !state->device->hci || !state->device->hci->intr_in) {
+            continue;
+        }
+        uint8_t bitmap[8];
+        memset(bitmap, 0, sizeof(bitmap));
+        int length = state->device->hci->intr_in(
+            state->device->hci, state->device, state->status_endpoint,
+            bitmap, state->status_endpoint->max_packet);
+        if (length > 0) status_change = true;
+    }
+    if (!status_change && now - g_last_poll_tick < 5) return;
+    g_last_poll_tick = now;
+
+    for (int i = 0; i < g_hub_count; i++) {
+        hub_state_t* state = &g_hubs[i];
+        if (!state->device || !state->device->hci) continue;
+        for (uint8_t port = 1; port <= state->ports; port++) {
+            hub_scan_port(state->device, state, port);
+        }
+    }
+}
+
+int usb_hub_count(void) {
+    return g_hub_count;
 }

@@ -41,8 +41,10 @@ C_SOURCES = kernel/kernel.c \
             drivers/speaker.c \
             drivers/mouse.c \
             drivers/keyboard.c \
+            drivers/usb_compat.c \
             drivers/usb_core.c \
             drivers/usb_ehci.c \
+            drivers/usb_ohci.c \
             drivers/usb_uhci.c \
             drivers/usb_hub.c \
             drivers/usb_hid.c \
@@ -75,6 +77,7 @@ ASM_OBJECTS = $(ASM_SOURCES:.asm=.o)
 OBJECTS = $(C_OBJECTS) $(ASM_OBJECTS)
 
 KERNEL_ELF = iso/boot/kernel.elf
+LIBGCC := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
 VERSION_STR = $(shell grep "KERNEL_BUILD" include/version.h 2>/dev/null | head -1 | cut -d '"' -f 2)
 ISO_FILE = pixel_neko_build_$(VERSION_STR).iso
 
@@ -98,7 +101,7 @@ include/version.h: scripts/build_counter.sh
 $(KERNEL_ELF): $(OBJECTS) link_grub.ld
 	@echo "  LD    $@"
 	@mkdir -p iso/boot/grub
-	$(LD) $(LDFLAGS) -T link_grub.ld $(OBJECTS) -o $@
+	$(LD) $(LDFLAGS) -T link_grub.ld $(OBJECTS) $(LIBGCC) -o $@
 
 iso/boot/grub/grub.cfg:
 	@mkdir -p iso/boot/grub

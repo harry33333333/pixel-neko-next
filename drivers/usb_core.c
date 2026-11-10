@@ -1,459 +1,628 @@
-/*
- * Pixel Neko Next - USB Core Subsystem
- *
- * Derived from FreeBSD sys/dev/usb/usb_core.c, usb_transfer.c and usb_device.c
- * Copyright (c) 2008 Hans Petter Selasky <hselasky@FreeBSD.org>
- * Copyright (c) 1998, 2004 Lennart Augustsson <lennart@augustsson.net>
- * Copyright (c) 2026 Pixel Neko Project
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
-
 #include "usb_core.h"
-#include "usb_hub.h"
 #include "usb_hid.h"
-#include "usb_ehci.h"
+#include "usb_hub.h"
+#include "usb_storage.h"
 #include "usb_uhci.h"
-#include "timer.h"
+#include "usb_ohci.h"
+#include "usb_ehci.h"
+#include "port.h"
 #include "log.h"
-#include "pci.h"
+#include "string.h"
 
-#define USB_UHCI_LEGACY_SUPPORT_REG 0xC0U
-#define USB_UHCI_LEGACY_RWC         0x8F00U
-#define USB_UHCI_LEGACY_RO          0x5040U
-
-#define USB_VMWARE_VENDOR_ID        0x15ADU
-#define USB_VMWARE_UHCI_DEVICE_ID   0x0774U
-
-static usb_hci_t*   g_hcis[USB_MAX_HCIS];
-static int          g_hci_count = 0;
-static unsigned int g_host_controller_kinds = 0;
-
+static usb_hci_t* g_hcis[USB_MAX_HCIS];
+static uint32_t g_hci_count = 0;
+static uint32_t g_controller_kinds = 0;
 static usb_device_t g_devices[USB_MAX_DEVICES];
-static unsigned char g_next_addr = 1;
-static int g_firmware_legacy_state = -1;
+static uint32_t g_device_count = 0;
+static uint8_t g_next_address = 1;
+static uint64_t g_tsc_per_ms = 0;
 
-int usb_firmware_legacy_active(void)
-{
-    if (g_firmware_legacy_state >= 0) return g_firmware_legacy_state;
+#define PIT_INPUT_HZ 1193182ULL
 
-    g_firmware_legacy_state = 0;
-    int count = pci_get_device_count();
+static inline uint64_t read_tsc(void) {
+    uint32_t low = 0;
+    uint32_t high = 0;
+    __asm__ volatile ("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
 
-    for (int i = 0; i < count; i++) {
-        const pci_device_t* dev = pci_get_device(i);
-        if (!dev || dev->class_code != 0x0C || dev->subclass != 0x03) {
-            continue;
+static bool calibrate_tsc_with_pit(void) {
+    const uint32_t sample_ms = 10;
+    uint16_t divisor =
+        (uint16_t)((1193182U * sample_ms + 500U) / 1000U);
+    uint8_t gate = inb(0x61);
+
+    outb(0x61, (uint8_t)(gate & ~1u));
+    outb(0x43, 0xB0); /* Channel 2, mode 0, binary count. */
+    outb(0x42, (uint8_t)(divisor & 0xFF));
+    outb(0x42, (uint8_t)(divisor >> 8));
+    uint64_t start = read_tsc();
+    outb(0x61, (uint8_t)(gate | 1u));
+
+    bool elapsed = false;
+    for (uint32_t spin = 0; spin < 5000000u; spin++) {
+        if (inb(0x61) & 0x20u) {
+            elapsed = true;
+            break;
         }
+        __asm__ volatile ("pause");
+    }
+    uint64_t end = read_tsc();
+    outb(0x61, (uint8_t)(gate & ~1u));
+    if (!elapsed || end <= start) return false;
 
-        if (dev->prog_if == 0x00) {
-            unsigned int legsup =
-                pci_config_read(dev->bus, dev->slot, dev->function,
-                                USB_UHCI_LEGACY_SUPPORT_REG) & 0xFFFFU;
+    uint32_t diff = (uint32_t)(end - start);
+    g_tsc_per_ms = diff / sample_ms;
+    return g_tsc_per_ms > 1000;
+}
 
-            /*
-             * VMware's virtual UHCI can leave firmware routing bits visible
-             * even though there is no SMM legacy emulation behind them. It
-             * must be handed to the native driver after firmware boot.
-             */
-            if (dev->vendor == USB_VMWARE_VENDOR_ID &&
-                dev->device == USB_VMWARE_UHCI_DEVICE_ID) {
-                continue;
-            }
-
-            /*
-             * The status bits are write-one-to-clear and several bits are
-             * read-only. Only the remaining programmed legacy controls show
-             * that firmware is still translating USB input through SMM.
-             */
-            if (legsup & ~(USB_UHCI_LEGACY_RWC | USB_UHCI_LEGACY_RO)) {
-                log_printf("[USB  ] firmware legacy USB owns UHCI %X:%X.%X "
-                           "(legsup=0x%X)\n",
-                           dev->bus, dev->slot, dev->function, legsup);
-                g_firmware_legacy_state = 1;
-                break;
-            }
+static void pit_delay_fallback(uint32_t milliseconds) {
+    uint8_t gate = inb(0x61);
+    while (milliseconds) {
+        uint32_t chunk = milliseconds > 25 ? 25 : milliseconds;
+        uint16_t divisor =
+            (uint16_t)((1193182U * chunk + 500U) / 1000U);
+        outb(0x61, (uint8_t)(gate & ~1u));
+        outb(0x43, 0xB0);
+        outb(0x42, (uint8_t)(divisor & 0xFF));
+        outb(0x42, (uint8_t)(divisor >> 8));
+        outb(0x61, (uint8_t)(gate | 1u));
+        for (uint32_t spin = 0; spin < 5000000u; spin++) {
+            if (inb(0x61) & 0x20u) break;
+            __asm__ volatile ("pause");
         }
-    }
-
-    if (g_firmware_legacy_state == 0) {
-        log_printf("[USB  ] no firmware-owned legacy USB controller detected\n");
-    }
-    return g_firmware_legacy_state;
-}
-
-void usb_memset(void* dst, unsigned char c, unsigned int n)
-{
-    unsigned char* d = (unsigned char*)dst;
-    for (unsigned int i = 0; i < n; i++) {
-        d[i] = c;
+        outb(0x61, (uint8_t)(gate & ~1u));
+        milliseconds -= chunk;
     }
 }
 
-void usb_memcpy(void* dst, const void* src, unsigned int n)
-{
-    unsigned char* d = (unsigned char*)dst;
-    const unsigned char* s = (const unsigned char*)src;
-    for (unsigned int i = 0; i < n; i++) {
-        d[i] = s[i];
+void usb_memset(void* destination, uint8_t value, size_t length) {
+    memset(destination, value, length);
+}
+
+void usb_memcpy(void* destination, const void* source, size_t length) {
+    memcpy(destination, source, length);
+}
+
+void usb_delay_ms(uint32_t milliseconds) {
+    if (!milliseconds) return;
+    if (!g_tsc_per_ms && !calibrate_tsc_with_pit()) {
+        pit_delay_fallback(milliseconds);
+        return;
+    }
+    if (g_tsc_per_ms == 0 || milliseconds > 60000) {
+        pit_delay_fallback(milliseconds);
+        return;
+    }
+
+    uint64_t target = read_tsc() + (uint64_t)milliseconds * g_tsc_per_ms;
+    while ((int64_t)(read_tsc() - target) < 0) {
+        __asm__ volatile ("pause");
     }
 }
 
-void usb_register_hci(usb_hci_t* hci)
-{
-    if (g_hci_count < USB_MAX_HCIS && hci) {
-        g_hcis[g_hci_count++] = hci;
-        g_host_controller_kinds |= hci->kind;
-        log_printf("[USB  ] Registered host controller: %s\n", hci->name ? hci->name : "Unknown");
-    }
+int usb_firmware_legacy_active(void) {
+    return 0;
 }
 
-const char* usb_host_controller_summary(void)
-{
-    int ehci = (g_host_controller_kinds & USB_HCI_KIND_EHCI) != 0;
-    int uhci = (g_host_controller_kinds & USB_HCI_KIND_UHCI) != 0;
-
-    if (ehci && uhci) return "USB2.0 EHCI + USB1.1 UHCI";
-    if (ehci) return "USB2.0 EHCI";
-    if (uhci) return "USB1.1 UHCI";
-    if (usb_firmware_legacy_active()) return "BIOS USB Legacy (PS/2)";
-    return "No native host controller";
+/* Fallback stub for USB Mass Storage when not loaded */
+__attribute__((weak)) int usb_storage_attach(usb_device_t* device) {
+    (void)device;
+    return -1;
 }
 
-usb_device_t* usb_alloc_device(void)
-{
-    for (int i = 0; i < USB_MAX_DEVICES; i++) {
-        if (!g_devices[i].hci) {
-            usb_memset(&g_devices[i], 0, sizeof(usb_device_t));
-            return &g_devices[i];
-        }
-    }
-    return (usb_device_t*)0;
+__attribute__((weak)) void usb_storage_detach(usb_device_t* device) {
+    (void)device;
 }
 
-void usb_release_device(usb_device_t* dev)
-{
-    if (dev) {
-        dev->hci = (usb_hci_t*)0;
-    }
+void usb_register_hci(usb_hci_t* hci) {
+    if (!hci || g_hci_count >= USB_MAX_HCIS) return;
+    g_hcis[g_hci_count++] = hci;
+    g_controller_kinds |= hci->kind;
+    log_printf("[USB ] Registered %s: root_ports=%u\n",
+               hci->name ? hci->name : "HCI", hci->root_ports);
 }
 
-void usb_disconnect_port(usb_hci_t* hci, int root_port)
-{
-    if (!hci || root_port <= 0) return;
+uint32_t usb_get_hci_count(void) {
+    return g_hci_count;
+}
 
-    int remove[USB_MAX_DEVICES] = {0};
-    for (int i = 0; i < USB_MAX_DEVICES; i++) {
-        usb_device_t* dev = &g_devices[i];
-        if (dev->hci == hci && dev->parent_hub == 0 &&
-            dev->port == root_port) {
-            remove[i] = 1;
-        }
-    }
+uint32_t usb_get_device_count(void) {
+    return g_device_count;
+}
 
-    int changed;
-    do {
-        changed = 0;
-        for (int i = 0; i < USB_MAX_DEVICES; i++) {
-            usb_device_t* dev = &g_devices[i];
-            if (!dev->hci || dev->hci != hci || remove[i]) continue;
+uint32_t usb_get_controller_kinds(void) {
+    return g_controller_kinds;
+}
 
-            for (int j = 0; j < USB_MAX_DEVICES; j++) {
-                if (remove[j] && g_devices[j].address == dev->parent_hub) {
-                    remove[i] = 1;
-                    changed = 1;
+void usb_release_device(usb_device_t* dev) {
+    if (!dev) return;
+    uint8_t parent_address = dev->address;
+    usb_hci_t* hci = dev->hci;
+    if (parent_address && hci) {
+        bool removed;
+        do {
+            removed = false;
+            for (uint32_t i = 0; i < USB_MAX_DEVICES; i++) {
+                if (g_devices[i].hci == hci &&
+                    g_devices[i].parent_hub_address == parent_address) {
+                    usb_release_device(&g_devices[i]);
+                    removed = true;
                     break;
                 }
             }
-        }
-    } while (changed);
-
-    for (int i = 0; i < USB_MAX_DEVICES; i++) {
-        if (!remove[i]) continue;
-        usb_device_t* dev = &g_devices[i];
-        usb_hid_detach(dev);
-        if (hci->device_release) hci->device_release(hci, dev);
-        dev->hci = (usb_hci_t*)0;
+        } while (removed);
     }
+    if (dev->hci && dev->hci->device_release) {
+        dev->hci->device_release(dev->hci, dev);
+    }
+    usb_hid_detach(dev);
+    usb_hub_detach(dev);
+    usb_storage_detach(dev);
+    memset(dev, 0, sizeof(*dev));
+    if (g_device_count) g_device_count--;
 }
 
-int usb_control_msg(usb_device_t* dev, int dir, unsigned char request,
-                    unsigned short value, unsigned short index,
-                    void* data, int len)
-{
-    if (!dev || !dev->hci || !dev->hci->control) return -1;
-
-    usb_setup_packet_t setup;
-    setup.bmRequestType = (unsigned char)dir;
-    setup.bRequest = request;
-    setup.wValue = value;
-    setup.wIndex = index;
-    setup.wLength = (unsigned short)len;
-
-    int transfer_dir = (dir & USB_DIR_IN) ? USB_DIR_IN : USB_DIR_OUT;
-    return dev->hci->control(dev->hci, dev, &setup, data, len, transfer_dir);
+usb_device_t* usb_alloc_device(void) {
+    for (uint32_t i = 0; i < USB_MAX_DEVICES; i++) {
+        if (!g_devices[i].hci) {
+            memset(&g_devices[i], 0, sizeof(g_devices[i]));
+            g_device_count++;
+            return &g_devices[i];
+        }
+    }
+    return NULL;
 }
 
-static void parse_config_descriptors(usb_device_t* dev, const unsigned char* buf, int total_len)
-{
-    const usb_interface_desc_t* selected = (const usb_interface_desc_t*)0;
-    int selected_score = -1;
+usb_device_t* usb_find_device_by_address(uint8_t address) {
+    if (address == 0) return NULL;
+    for (uint32_t i = 0; i < USB_MAX_DEVICES; i++) {
+        if (g_devices[i].hci && g_devices[i].address == address) {
+            return &g_devices[i];
+        }
+    }
+    return NULL;
+}
+
+usb_device_t* usb_find_child(usb_device_t* hub, uint8_t port) {
+    if (!hub || !hub->address) return NULL;
+    for (uint32_t i = 0; i < USB_MAX_DEVICES; i++) {
+        if (g_devices[i].hci == hub->hci &&
+            g_devices[i].parent_hub_address == hub->address &&
+            g_devices[i].parent_port == port) {
+            return &g_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static uint8_t allocate_address(void) {
+    for (uint32_t attempts = 0; attempts < 126; attempts++) {
+        uint8_t candidate = g_next_address++;
+        if (g_next_address >= 127) g_next_address = 1;
+        if (!usb_find_device_by_address(candidate)) return candidate;
+    }
+    return 0;
+}
+
+int usb_control_msg(usb_device_t* dev, int direction, uint8_t request,
+                    uint16_t value, uint16_t index, void* data, int length) {
+    if (!dev || !dev->hci || !dev->hci->control || length < 0) return -1;
+    usb_setup_packet_t setup = {
+        .bmRequestType = (uint8_t)direction,
+        .bRequest = request,
+        .wValue = value,
+        .wIndex = index,
+        .wLength = (uint16_t)length
+    };
+    return dev->hci->control(dev->hci, dev, &setup, data, length,
+                             (direction & USB_DIR_IN) ? USB_DIR_IN : USB_DIR_OUT);
+}
+
+static void parse_configuration(usb_device_t* dev, const uint8_t* buffer,
+                                int length) {
     int offset = 0;
+    int selected_score = -1;
+    uint8_t device_class = dev->class_code;
+    uint8_t device_subclass = dev->subclass;
+    uint8_t device_protocol = dev->protocol;
 
-    /* Prefer a HID interface, then a Hub interface, over unrelated composite
-     * functions such as Audio or Video. */
-    while (offset + 2 <= total_len) {
-        unsigned char len = buf[offset];
-        unsigned char type = buf[offset + 1];
-        if (len < 2 || offset + len > total_len) break;
+    uint8_t cur_if_num = 0;
+    uint8_t cur_if_alt = 0;
+    uint8_t cur_if_class = device_class;
+    uint8_t cur_if_subclass = device_subclass;
+    uint8_t cur_if_proto = device_protocol;
+    uint16_t cur_hid_report_len = 0;
+    bool have_interface = false;
+    usb_endpoint_t* current_endpoint = NULL;
 
-        if (type == USB_DT_INTERFACE &&
-            len >= sizeof(usb_interface_desc_t)) {
-            const usb_interface_desc_t* iface =
-                (const usb_interface_desc_t*)&buf[offset];
-            int score = 1;
-            if (iface->bInterfaceClass == USB_CLASS_HID) score = 3;
-            else if (iface->bInterfaceClass == USB_CLASS_HUB) score = 2;
-            if (score > selected_score) {
-                selected = iface;
-                selected_score = score;
+    while (offset + 2 <= length) {
+        uint8_t item_length = buffer[offset];
+        uint8_t item_type = buffer[offset + 1];
+        if (item_length < 2 || offset + item_length > length) break;
+
+        if (item_type == USB_DT_INTERFACE && item_length >= 9) {
+            const usb_interface_desc_t* interface =
+                (const usb_interface_desc_t*)(buffer + offset);
+            cur_if_num = interface->bInterfaceNumber;
+            cur_if_alt = interface->bAlternateSetting;
+            cur_if_class = interface->bInterfaceClass;
+            cur_if_subclass = interface->bInterfaceSubClass;
+            cur_if_proto = interface->bInterfaceProtocol;
+            cur_hid_report_len = 0;
+            have_interface = true;
+            current_endpoint = NULL;
+
+            if (cur_if_class == 0 && device_class) {
+                cur_if_class = device_class;
+                cur_if_subclass = device_subclass;
+                cur_if_proto = device_protocol;
             }
-        }
-        offset += len;
-    }
-
-    if (!selected) return;
-
-    dev->class_code = selected->bInterfaceClass;
-    dev->subclass = selected->bInterfaceSubClass;
-    dev->protocol = selected->bInterfaceProtocol;
-    dev->interface_number = selected->bInterfaceNumber;
-    dev->interface_protocol = selected->bInterfaceProtocol;
-    dev->endpoint_count = 0;
-
-    int current_interface = -1;
-    offset = 0;
-    while (offset + 2 <= total_len) {
-        unsigned char len = buf[offset];
-        unsigned char type = buf[offset + 1];
-        if (len < 2 || offset + len > total_len) break;
-
-        if (type == USB_DT_INTERFACE &&
-            len >= sizeof(usb_interface_desc_t)) {
-            const usb_interface_desc_t* iface =
-                (const usb_interface_desc_t*)&buf[offset];
-            current_interface = iface->bInterfaceNumber;
-        } else if (type == USB_DT_ENDPOINT &&
-                   len >= sizeof(usb_endpoint_desc_t) &&
-                   current_interface == dev->interface_number) {
-            const usb_endpoint_desc_t* ep = (const usb_endpoint_desc_t*)&buf[offset];
-            if (dev->endpoint_count < USB_MAX_ENDPOINTS) {
-                usb_endpoint_t* e = &dev->endpoints[dev->endpoint_count++];
-                e->address = ep->bEndpointAddress & 0x0F;
-                e->direction = (ep->bEndpointAddress & 0x80) ? USB_DIR_IN : USB_DIR_OUT;
-                e->type = ep->bmAttributes & 0x03;
-                e->interval = ep->bInterval;
-                e->max_packet = ep->wMaxPacketSize & 0x07FF;
-                e->toggle = 0;
-                e->hcd_priv = (void*)0;
+            if (cur_if_alt == 0) {
+                int score = 1;
+                if (cur_if_class == USB_CLASS_HID) {
+                    if (cur_if_proto == USB_HID_PROTOCOL_MOUSE) score = 5;
+                    else if (cur_if_proto == USB_HID_PROTOCOL_KBD) score = 4;
+                    else score = 3;
+                } else if (cur_if_class == USB_CLASS_HUB) {
+                    score = 2;
+                }
+                if (score > selected_score) {
+                    selected_score = score;
+                    dev->class_code = cur_if_class;
+                    dev->subclass = cur_if_subclass;
+                    dev->protocol = cur_if_proto;
+                    dev->interface_number = cur_if_num;
+                    dev->interface_subclass = cur_if_subclass;
+                    dev->interface_protocol = cur_if_proto;
+                }
             }
+        } else if (item_type == USB_DT_HID && item_length >= 9 &&
+                   have_interface && cur_if_alt == 0) {
+            if (buffer[offset + 6] == USB_DT_REPORT) {
+                cur_hid_report_len = (uint16_t)buffer[offset + 7] |
+                                     ((uint16_t)buffer[offset + 8] << 8);
+                /* Update any endpoints already parsed for this interface */
+                for (uint8_t ep = 0; ep < dev->endpoint_count; ep++) {
+                    if (dev->endpoints[ep].interface_number == cur_if_num &&
+                        dev->endpoints[ep].hid_report_desc_len == 0) {
+                        dev->endpoints[ep].hid_report_desc_len = cur_hid_report_len;
+                    }
+                }
+            }
+        } else if (item_type == USB_DT_ENDPOINT && item_length >= 7 &&
+                   have_interface && cur_if_alt == 0 &&
+                   dev->endpoint_count < USB_MAX_ENDPOINTS) {
+            const usb_endpoint_desc_t* descriptor =
+                (const usb_endpoint_desc_t*)(buffer + offset);
+            usb_endpoint_t* endpoint =
+                &dev->endpoints[dev->endpoint_count++];
+            memset(endpoint, 0, sizeof(*endpoint));
+            endpoint->address = descriptor->bEndpointAddress;
+            endpoint->number = descriptor->bEndpointAddress & 0x0F;
+            endpoint->direction = (descriptor->bEndpointAddress & USB_DIR_IN)
+                                      ? USB_DIR_IN
+                                      : USB_DIR_OUT;
+            endpoint->type = descriptor->bmAttributes & 0x03;
+            endpoint->interval = descriptor->bInterval;
+            endpoint->max_packet = descriptor->wMaxPacketSize & 0x07FFu;
+            endpoint->interface_number = cur_if_num;
+            endpoint->interface_class = cur_if_class;
+            endpoint->interface_subclass = cur_if_subclass;
+            endpoint->interface_protocol = cur_if_proto;
+            endpoint->hid_report_desc_len = cur_hid_report_len;
+            current_endpoint = endpoint;
+        } else if (item_type == USB_DT_SS_ENDPOINT_COMPANION &&
+                   item_length >= 6 && current_endpoint) {
+            current_endpoint->max_burst = buffer[offset + 2] & 0x0Fu;
+            current_endpoint->bytes_per_interval =
+                (uint16_t)buffer[offset + 4] |
+                ((uint16_t)buffer[offset + 5] << 8);
         }
-        offset += len;
+        offset += item_length;
     }
 }
 
-static int usb_enumerate_device(usb_hci_t* hci, usb_device_t* parent_hub, int port, int speed)
-{
+static int enumerate_device(usb_hci_t* hci, usb_device_t* parent_hub,
+                            uint8_t port, uint8_t speed) {
     usb_device_t* dev = usb_alloc_device();
     if (!dev) {
-        log_printf("[USB  ] No free device slots\n");
+        log_printf("[USB ] Device table exhausted\n");
         return -1;
     }
 
     dev->hci = hci;
-    dev->port = (unsigned char)port;
-    dev->speed = (unsigned char)speed;
-    dev->address = 0;
-    dev->max_packet0 = (speed == USB_SPEED_HIGH) ? 64 : 8;
-
+    dev->speed = speed;
+    dev->port = port;
+    dev->max_packet0 = (speed == USB_SPEED_SUPER) ? 512 :
+                       (speed == USB_SPEED_HIGH) ? 64 : 8;
     if (parent_hub) {
-        dev->parent_hub = parent_hub->address;
-        dev->parent_port = (unsigned char)port;
-        dev->hub_depth = parent_hub->hub_depth + 1;
-    } else {
-        dev->parent_hub = 0;
-        dev->parent_port = 0;
-        dev->hub_depth = 0;
-    }
-
-    /* 1. Read first 8 bytes of Device Descriptor to get bMaxPacketSize0 */
-    usb_device_desc_t desc;
-    usb_memset(&desc, 0, sizeof(desc));
-    int ret = usb_control_msg(dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
-                              USB_REQ_GET_DESCRIPTOR, (USB_DT_DEVICE << 8) | 0, 0,
-                              &desc, 8);
-    if (ret < 8) {
-        log_printf("[USB  ] Failed to read initial dev desc (err=%d)\n", ret);
-        usb_release_device(dev);
-        return -1;
-    }
-
-    if (desc.bMaxPacketSize0 > 0) {
-        dev->max_packet0 = desc.bMaxPacketSize0;
-    }
-
-    /* 2. Assign unique address */
-    unsigned char new_addr = g_next_addr++;
-    if (g_next_addr >= 127) g_next_addr = 1;
-
-    ret = usb_control_msg(dev, USB_DIR_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
-                          USB_REQ_SET_ADDRESS, new_addr, 0, (void*)0, 0);
-    if (ret < 0) {
-        log_printf("[USB  ] Failed to set address %u\n", new_addr);
-        usb_release_device(dev);
-        return -1;
-    }
-    sleep_ms(10);
-    dev->address = new_addr;
-
-    /* 3. Read full 18-byte Device Descriptor */
-    usb_memset(&desc, 0, sizeof(desc));
-    ret = usb_control_msg(dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
-                          USB_REQ_GET_DESCRIPTOR, (USB_DT_DEVICE << 8) | 0, 0,
-                          &desc, sizeof(desc));
-    if (ret >= (int)sizeof(usb_device_desc_t) &&
-        desc.bLength >= sizeof(usb_device_desc_t) &&
-        desc.bDescriptorType == USB_DT_DEVICE) {
-        dev->vendor = desc.idVendor;
-        dev->product = desc.idProduct;
-        dev->class_code = desc.bDeviceClass;
-        dev->subclass = desc.bDeviceSubClass;
-        dev->protocol = desc.bDeviceProtocol;
-    }
-
-    log_printf("[USB  ] Dev %u (port %d, speed %d): VID:PID %X:%X class %X:%X\n",
-               dev->address, port, speed, dev->vendor, dev->product,
-               dev->class_code, dev->subclass);
-
-    /* 4. Read Configuration Descriptor */
-    unsigned char cfg_buf[512];
-    usb_memset(cfg_buf, 0, sizeof(cfg_buf));
-    ret = usb_control_msg(dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
-                          USB_REQ_GET_DESCRIPTOR, (USB_DT_CONFIG << 8) | 0, 0,
-                          cfg_buf, 9);
-    if (ret >= 9) {
-        const usb_config_desc_t* cfg = (const usb_config_desc_t*)cfg_buf;
-        unsigned short total_len = cfg->wTotalLength;
-        if (total_len > sizeof(cfg_buf)) total_len = sizeof(cfg_buf);
-        dev->config_value = cfg->bConfigurationValue;
-
-        ret = usb_control_msg(dev, USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
-                              USB_REQ_GET_DESCRIPTOR, (USB_DT_CONFIG << 8) | 0, 0,
-                              cfg_buf, total_len);
-        if (ret >= 9) {
-            parse_config_descriptors(dev, cfg_buf, ret);
+        dev->parent_hub_address = parent_hub->address;
+        dev->parent_port = port;
+        dev->hub_depth = (uint8_t)(parent_hub->hub_depth + 1);
+        uint32_t route_shift =
+            (uint32_t)(parent_hub->hub_depth > 4 ? 4 :
+                       parent_hub->hub_depth) * 4u;
+        dev->route = parent_hub->route |
+                     ((uint32_t)(port & 0x0Fu) << route_shift);
+        if (speed < USB_SPEED_HIGH) {
+            if (parent_hub->speed == USB_SPEED_HIGH) {
+                dev->hs_hub_address = parent_hub->address;
+                dev->hs_port_number = port;
+            } else {
+                dev->hs_hub_address = parent_hub->hs_hub_address;
+                dev->hs_port_number = parent_hub->hs_port_number;
+            }
         }
     }
 
-    /* 5. Set Configuration */
-    if (dev->config_value == 0) dev->config_value = 1;
-    ret = usb_control_msg(dev, USB_DIR_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
-                          USB_REQ_SET_CONFIGURATION, dev->config_value, 0,
-                          (void*)0, 0);
-    if (ret < 0) {
-        log_printf("[USB  ] Failed to configure device %u\n", dev->address);
+    usb_device_desc_t descriptor;
+    int result = -1;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        memset(&descriptor, 0, sizeof(descriptor));
+        result = usb_control_msg(
+            dev,
+            USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
+            USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0,
+            &descriptor, 8);
+        if (result >= 8 &&
+            descriptor.bLength >= 8 &&
+            descriptor.bDescriptorType == USB_DT_DEVICE &&
+            descriptor.bMaxPacketSize0 != 0) {
+            break;
+        }
+        result = -1;
+        usb_delay_ms(10);
+    }
+    if (result < 8) {
+        log_printf("[USB ] Initial device descriptor failed on port %u "
+                   "(%d) head=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   port, result,
+                   descriptor.bLength, descriptor.bDescriptorType,
+                   (unsigned)(descriptor.bcdUSB & 0xFF),
+                   (unsigned)(descriptor.bcdUSB >> 8),
+                   descriptor.bDeviceClass, descriptor.bDeviceSubClass,
+                   descriptor.bDeviceProtocol, descriptor.bMaxPacketSize0);
         usb_release_device(dev);
         return -1;
     }
-    sleep_ms(10);
 
-    /* 6. Probe device class */
-    if (dev->class_code == USB_CLASS_HUB) {
-        log_printf("[USB  ] Device %u is a USB Hub (RMH or external)\n", dev->address);
-        usb_hub_probe(dev);
-    } else if (dev->class_code == USB_CLASS_HID || dev->interface_protocol != 0) {
-        usb_hid_attach(dev);
+    if (speed == USB_SPEED_SUPER) {
+        dev->max_packet0 = 512;
+    } else if (speed == USB_SPEED_LOW) {
+        dev->max_packet0 = 8;
+    } else if (descriptor.bMaxPacketSize0 == 8 ||
+               descriptor.bMaxPacketSize0 == 16 ||
+               descriptor.bMaxPacketSize0 == 32 ||
+               descriptor.bMaxPacketSize0 == 64) {
+        dev->max_packet0 = descriptor.bMaxPacketSize0;
+    } else if (speed == USB_SPEED_HIGH) {
+        dev->max_packet0 = 64;
+    } else {
+        dev->max_packet0 = 8;
     }
 
+    uint8_t address = allocate_address();
+    if (!address) {
+        usb_release_device(dev);
+        return -1;
+    }
+    if (!hci->skips_set_address) {
+        result = usb_control_msg(
+            dev,
+            USB_DIR_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
+            USB_REQ_SET_ADDRESS, address, 0, NULL, 0);
+        if (result < 0) {
+            log_printf("[USB ] SET_ADDRESS %u failed (%d)\n", address, result);
+            usb_release_device(dev);
+            return -1;
+        }
+        usb_delay_ms(10);
+    }
+    dev->address = address;
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    result = usb_control_msg(
+        dev,
+        USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
+        USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0,
+        &descriptor, sizeof(descriptor));
+    if (result < (int)sizeof(descriptor) ||
+        descriptor.bLength < sizeof(descriptor) ||
+        descriptor.bDescriptorType != USB_DT_DEVICE) {
+        log_printf("[USB ] Malformed device descriptor on port %u (%d)\n",
+                   port, result);
+        usb_release_device(dev);
+        return -1;
+    }
+    dev->vendor = descriptor.idVendor;
+    dev->product = descriptor.idProduct;
+    dev->class_code = descriptor.bDeviceClass;
+    dev->subclass = descriptor.bDeviceSubClass;
+    dev->protocol = descriptor.bDeviceProtocol;
+
+    uint8_t config_buffer[1024];
+    memset(config_buffer, 0, sizeof(config_buffer));
+    bool configuration_valid = false;
+    result = usb_control_msg(
+        dev,
+        USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
+        USB_REQ_GET_DESCRIPTOR, USB_DT_CONFIG << 8, 0,
+        config_buffer, 9);
+    if (result >= 9 &&
+        config_buffer[0] >= 9 &&
+        config_buffer[1] == USB_DT_CONFIG) {
+        usb_config_desc_t* config = (usb_config_desc_t*)config_buffer;
+        uint16_t total = config->wTotalLength;
+        if (total >= 9 && config->bConfigurationValue != 0) {
+            if (total > sizeof(config_buffer)) total = sizeof(config_buffer);
+            dev->configuration_value = config->bConfigurationValue;
+            result = usb_control_msg(
+                dev,
+                USB_DIR_IN | USB_RT_STANDARD | USB_RT_DEVICE,
+                USB_REQ_GET_DESCRIPTOR, USB_DT_CONFIG << 8, 0,
+                config_buffer, total);
+            if (result >= 9 &&
+                config_buffer[0] >= 9 &&
+                config_buffer[1] == USB_DT_CONFIG) {
+                parse_configuration(dev, config_buffer, result);
+                configuration_valid = true;
+            }
+        }
+    }
+
+    if (!configuration_valid) {
+        log_printf("[USB ] Configuration descriptor unavailable on port %u "
+                   "(%d, total=%u)\n", port, result,
+                   (unsigned)((uint16_t)config_buffer[2] |
+                              ((uint16_t)config_buffer[3] << 8)));
+        usb_release_device(dev);
+        return -1;
+    }
+    result = usb_control_msg(
+        dev,
+        USB_DIR_OUT | USB_RT_STANDARD | USB_RT_DEVICE,
+        USB_REQ_SET_CONFIGURATION, dev->configuration_value, 0, NULL, 0);
+    if (result < 0) {
+        log_printf("[USB ] SET_CONFIGURATION failed for address %u\n",
+                   dev->address);
+        usb_release_device(dev);
+        return -1;
+    }
+    usb_delay_ms(10);
+    dev->configuration = dev->configuration_value;
+
+    log_printf("[USB ] Device %u %s port=%u VID:PID=%04x:%04x class=%02x:%02x endpoints=%u\n",
+               dev->address, usb_speed_name(dev->speed), port,
+               dev->vendor, dev->product, dev->class_code, dev->subclass,
+               dev->endpoint_count);
+
+    if (dev->class_code == USB_CLASS_HUB) {
+        dev->is_hub = true;
+        if (usb_hub_attach(dev) != 0) {
+            log_printf("[USB ] Hub attach failed for device %u\n", dev->address);
+        }
+    } else if (dev->class_code == USB_CLASS_HID) {
+        if (usb_hid_attach(dev) != 0) {
+            log_printf("[USB ] HID attach failed for device %u\n", dev->address);
+        }
+    } else if (dev->class_code == USB_CLASS_MASS_STORAGE &&
+               dev->subclass == 0x06 && dev->protocol == 0x50) {
+        if (usb_storage_attach(dev) != 0) {
+            log_printf("[USB ] USB Mass Storage attach failed for device %u\n",
+                       dev->address);
+        }
+    }
     return 0;
 }
 
-int usb_enumerate(usb_hci_t* hci, int port, int speed)
-{
-    return usb_enumerate_device(hci, (usb_device_t*)0, port, speed);
+int usb_enumerate(usb_hci_t* hci, uint8_t port, uint8_t speed) {
+    return enumerate_device(hci, NULL, port, speed);
 }
 
-int usb_enumerate_hub(usb_hci_t* hci, usb_device_t* hub, int port, int speed)
-{
-    return usb_enumerate_device(hci, hub, port, speed);
+int usb_enumerate_hub(usb_hci_t* hci, usb_device_t* hub,
+                      uint8_t port, uint8_t speed) {
+    return enumerate_device(hci, hub, port, speed);
 }
 
-void usb_init(void)
-{
-    log_printf("[USB  ] Initializing USB subsystem...\n");
-
-    /* Scan PCI for USB Host Controllers (Class 0x0C, SubClass 0x03) */
-    pci_scan_all();
-    int count = pci_get_device_count();
-
-    /*
-     * A CSM with Legacy USB Support can emulate the 8042 ports through SMM.
-     * Resetting or owning either controller behind that firmware path makes
-     * some Intel 5-series boards lose both keyboard and mouse. Keep the working
-     * firmware path intact and let the existing PS/2 IRQ pipeline receive it.
-     */
-    if (usb_firmware_legacy_active()) {
-        log_printf("[USB  ] firmware-owned controllers left untouched; "
-                   "using BIOS USB keyboard/mouse emulation\n");
-        return;
+void usb_disconnect_child(usb_device_t* hub, uint8_t port) {
+    if (!hub || port > USB_MAX_HUB_PORTS) return;
+    uint8_t child_address = hub->child_address[port];
+    usb_device_t* child = usb_find_device_by_address(child_address);
+    if (child) {
+        log_printf("[USB ] Hotplug disconnect hub=%u port=%u address=%u\n",
+                   hub->address, port, child_address);
+        usb_release_device(child);
     }
-    log_printf("[USB  ] Legacy USB inactive; enabling native EHCI/UHCI ownership\n");
+    hub->child_address[port] = 0;
+    hub->hub_ports_seen &= (uint16_t)~(1u << port);
+}
 
-    /* 1. Probe EHCI (High-Speed USB 2.0, prog_if == 0x20) */
-    for (int i = 0; i < count; i++) {
-        const pci_device_t* dev = pci_get_device(i);
-        if (dev && dev->class_code == 0x0C && dev->subclass == 0x03 && dev->prog_if == 0x20) {
-            ehci_probe(dev);
+void usb_disconnect_port(usb_hci_t* hci, uint8_t root_port) {
+    for (uint32_t i = 0; i < USB_MAX_DEVICES; i++) {
+        usb_device_t* dev = &g_devices[i];
+        if (!dev->hci || dev->hci != hci || dev->parent_hub_address != 0 ||
+            dev->port != root_port) {
+            continue;
+        }
+        uint8_t address = dev->address;
+        log_printf("[USBHOT] Root port %u disconnected address %u\n",
+                   root_port, address);
+        usb_release_device(dev);
+        for (uint32_t j = 0; j < USB_MAX_DEVICES; j++) {
+            if (g_devices[j].hci == hci &&
+                g_devices[j].parent_hub_address == address) {
+                usb_release_device(&g_devices[j]);
+            }
+        }
+    }
+}
+
+const char* usb_speed_name(uint8_t speed) {
+    switch (speed) {
+        case USB_SPEED_LOW: return "Low-Speed";
+        case USB_SPEED_FULL: return "Full-Speed";
+        case USB_SPEED_HIGH: return "High-Speed";
+        case USB_SPEED_SUPER: return "SuperSpeed";
+        default: return "Unknown-Speed";
+    }
+}
+
+const char* usb_host_controller_summary(void) {
+    if (!g_hci_count) return "No native USB controller";
+    if (g_controller_kinds & USB_HCI_KIND_EHCI) {
+        if ((g_controller_kinds & USB_HCI_KIND_UHCI) || (g_controller_kinds & USB_HCI_KIND_OHCI)) {
+            return "EHCI 2.0 + Companion 1.1";
+        }
+        return "EHCI 2.0";
+    }
+    if ((g_controller_kinds & USB_HCI_KIND_UHCI) &&
+        (g_controller_kinds & USB_HCI_KIND_OHCI)) {
+        return "UHCI + OHCI 1.1";
+    }
+    if (g_controller_kinds & USB_HCI_KIND_UHCI) return "UHCI 1.1";
+    if (g_controller_kinds & USB_HCI_KIND_OHCI) return "OHCI 1.1";
+    return "USB controller active";
+}
+
+void usb_init(void) {
+    g_hci_count = 0;
+    g_controller_kinds = 0;
+    g_device_count = 0;
+    g_next_address = 1;
+    memset(g_devices, 0, sizeof(g_devices));
+    (void)usb_hid_selftest();
+
+    int pci_devices = pci_get_device_count();
+    /* Pass 0: EHCI (0x20), Pass 1: OHCI (0x10), Pass 2: UHCI (0x00) */
+    for (int pass = 0; pass < 3; pass++) {
+        uint8_t wanted_prog_if = pass == 0 ? 0x20 :
+                                 pass == 1 ? 0x10 : 0x00;
+        for (int i = 0; i < pci_devices; i++) {
+            const pci_device_t* pci = pci_get_device(i);
+            if (!pci || pci->class_code != 0x0C ||
+                pci->subclass != 0x03 || pci->prog_if != wanted_prog_if) {
+                continue;
+            }
+            const char* type = pass == 0 ? "EHCI" :
+                               pass == 1 ? "OHCI" : "UHCI";
+            log_printf("[USB ] Probing %s controller %04x:%04x at %02x:%02x.%x\n",
+                       type, pci->vendor, pci->device, pci->bus,
+                       pci->slot, pci->function);
+            if (pass == 0) ehci_probe(pci);
+            else if (pass == 1) ohci_probe(pci);
+            else uhci_probe(pci);
         }
     }
 
-    /* 2. Probe UHCI (Universal Host Controller, prog_if == 0x00) */
-    for (int i = 0; i < count; i++) {
-        const pci_device_t* dev = pci_get_device(i);
-        if (dev && dev->class_code == 0x0C && dev->subclass == 0x03 && dev->prog_if == 0x00) {
-            uhci_probe(dev);
-        }
-    }
-
-    log_printf("[USB  ] Initialization complete. Active controllers: %d\n", g_hci_count);
+    log_printf("[USB ] Initialization complete: controllers=%u devices=%u summary=%s\n",
+               g_hci_count, g_device_count, usb_host_controller_summary());
 }
 
-void usb_poll(void)
-{
-    for (int i = 0; i < g_hci_count; i++) {
-        if (g_hcis[i] && g_hcis[i]->poll) {
-            g_hcis[i]->poll(g_hcis[i]);
-        }
+void usb_poll(void) {
+    for (uint32_t i = 0; i < g_hci_count; i++) {
+        if (g_hcis[i] && g_hcis[i]->poll) g_hcis[i]->poll(g_hcis[i]);
     }
+    usb_hub_poll();
     usb_hid_poll();
 }

@@ -11,12 +11,22 @@ static int e0_flag = 0;
 static int key_buf[KEY_BUF_SIZE];
 static volatile int key_head = 0, key_tail = 0;
 
-static void push_key(int key) {
+void keyboard_push_key(int key) {
+    unsigned int flags = irq_save_flags();
     int next = (key_head + 1) % KEY_BUF_SIZE;
     if (next != key_tail) {
         key_buf[key_head] = key;
         key_head = next;
     }
+    irq_restore_flags(flags);
+}
+
+static void push_key(int key) {
+    keyboard_push_key(key);
+}
+
+void keyboard_set_ctrl(int is_ctrl) {
+    ctrl = is_ctrl;
 }
 
 int keyboard_get_key(void) {
