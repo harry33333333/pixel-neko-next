@@ -135,3 +135,4 @@ int usb_legacy_handoff(const pci_device_t* device) {
     }
     return 0;
 }
+

@@ -268,7 +268,6 @@ static void parse_report_descriptor(const uint8_t* desc, int length,
                 case 8: { /* Input */
                     uint32_t flags = hid_item_value(data, data_bytes);
                     bool constant = (flags & (1u << 0)) != 0;
-                    bool variable = (flags & (1u << 1)) != 0;
                     bool relative = (flags & (1u << 2)) != 0;
                     hid_report_layout_t* layout =
                         report_layout_for_id(descriptor, state.report_id);

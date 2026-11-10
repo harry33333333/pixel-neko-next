@@ -6,3 +6,4 @@
 int ohci_probe(const pci_device_t* device);
 
 #endif
+

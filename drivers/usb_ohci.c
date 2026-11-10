@@ -507,3 +507,4 @@ int ohci_probe(const pci_device_t* device) {
     ohci_poll(&c->hci);
     return 0;
 }
+

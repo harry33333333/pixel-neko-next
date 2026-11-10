@@ -6,12 +6,14 @@ QEMU = qemu-system-i386
 
 CFLAGS = -m32 -march=pentiumpro -ffreestanding -nostdlib -nostartfiles -fno-builtin \
          -fno-stack-protector -fno-pie -mno-mmx -mno-sse -mno-sse2 \
+         -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
          -std=gnu11 -Os -Wall -Wextra -Iinclude -I.
 
 LDFLAGS = -m elf_i386
 ASMFLAGS = -f elf32
 
 C_SOURCES = kernel/kernel.c \
+            kernel/string.c \
             kernel/mm.c \
             kernel/idt.c \
             kernel/irq.c \

@@ -7,3 +7,4 @@ int usb_storage_attach(usb_device_t* device);
 void usb_storage_detach(usb_device_t* device);
 
 #endif
+
